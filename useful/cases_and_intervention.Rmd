@@ -1,0 +1,171 @@
+```{r message=FALSE, warning=FALSE}
+# install.packages("anytime")
+# install.packages("plyr")
+# installed.packages("anytime")
+# install.packages("readxl")
+# install.packages("xlsx")
+library(MASS)
+library(anytime)
+library(tidyverse)
+library(lubridate)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(gridExtra)
+library(plyr)
+library(ggpubr)
+
+cases<-read.csv('/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/cases_timeseries_prov.csv') %>% filter(province=='Quebec')
+names(cases)[2]<-"date"
+cases$date <- as.Date(cases$date,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+s3 <- read_excel("/Users/oliviashi/Documents/MASTER_RESEARCH/INTERVENTION/covid-19-intervention-timeline-in-canada-en.xlsx",sheet=3,col_names=TRUE,skip=2)
+s3$date <- as.Date(s3$`Start date`,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+s3$cat <- s3$`Intervention Category`
+# s3 <- s3 %>% dplyr::select(Jurisdiction,date,Action,cat)
+data <- s3 %>% dplyr::select("Entry ID","date","cat","Action","Jurisdiction","Description") %>% filter(Jurisdiction=="Que.")
+data <- tibble(data)
+data$Closures <- as.numeric(NA)
+data$Openings <- as.numeric(NA)
+s3 %>% filter(cat=="Closures/openings") %>% filter(Jurisdiction=="Que.") %>% filter(Action=="Eased")
+data <- tibble(data)
+da <- join(cases,data,by="date",type="left",match="first")
+da
+```
+```{r message=FALSE, warning=FALSE}
+d=cases
+#join tables
+da<-join(cases,data,by="date",type="left",match="first")
+i=1
+for (i in 1:dim(da)[1]){
+if (isTRUE(da$Action[i] == "New") && isTRUE(da$cat[i]=="Closures/openings")) {
+da$Closures[i] <- da$cases[i]}
+else if (isTRUE(data$Action[i] == "Eased") && isTRUE(da$cat[i]=="Closures/openings")){
+da$Openings[i] <- da$cases[i]}}
+
+data <- da %>% dplyr::select(date,cases,cat,Action,Description)
+data <- pivot_wider(data=data,names_from=cat,values_from=Description) 
+data$Closures<-NA
+data$Openings<-NA
+data$cases2<-NA
+
+for(i in 1:length(data$date)){
+  if(is.na(data$`Closures/openings`[i])){
+    data$`Closures/openings`[i]<-NA
+  }else if(grepl('school',data$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) && da$Action[i]=="New"){
+    data$Closures[i]<-"school closed"
+  }else if(grepl('school',data$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) && da$Action[i]=="Eased"){
+    data$Openings[i]<-"school opened"
+  }else if(grepl('restaurant',data$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) && da$Action[i]=="New"){
+    data$Closures[i]<-"restaurant, rec closed"
+  }else if(grepl('restaurant',data$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) && da$Action[i]=="Eased"){
+    data$Openings[i]<-"restaurant, rec opened"
+  }else if(grepl('recreational',data$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) && da$Action[i]=="New"){
+    data$Closures[i]<-"restaurant, rec closed"
+  }else if(grepl('recreational',data$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) && da$Action[i]=="Eased"){
+    data$Openings[i]<-"restaurant, rec opened"
+  }else if(grepl('non-essential',data$`Closures/openings`[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    data$Closures[i]<-"non-essential closed"
+  }else if(grepl('non-essential',data$`Closures/openings`[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    data$Openings[i]<-"non-essential opened"
+  }else if((grepl('public places',data$`Closures/openings`[i], ignore.case = TRUE) ||grepl('parks',data$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||grepl('museums',data$`Closures/openings`[i], ignore.case = TRUE)) && da$Action[i]=="New"){
+    data$Closures[i]<-"public places closed"
+  }else if((grepl('public places',data$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||grepl('parks',data$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||grepl('museums',data$`Closures/openings`[i], ignore.case = TRUE)) && da$Action[i]=="Eased"){
+    data$Openings[i]<-"public places opened"
+  }
+}
+
+for(i in 1:length(data$date)){
+  if(!is.na(data$`Closures/openings`[i])){
+    data$cases2[i] <- data$cases[i]
+  }
+}
+
+data$cases3<-NA
+
+for(i in 1:length(data$date)){
+  if(!is.na(data$Distancing[i])){
+    data$cases3[i] <- data$cases[i]
+  }
+}
+
+for(i in 1:length(data$date)){
+  if(is.na(data$Distancing[i])){
+  }else if(grepl('curfew',data$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    data$Distancing[i]<-"curfew"
+  }else if(grepl('gathering',data$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    data$Distancing[i]<-"gathering restricted"
+  }else if(grepl('gathering',data$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    data$Distancing[i]<-"gathering permitted"
+  }else if(grepl('worship',data$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    data$Distancing[i]<-"bar, worship restricted"
+  }else if(grepl('bar',data$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    data$Distancing[i]<-"bar, worship restricted"
+  }else{
+    data$Distancing[i]<-"other"
+  }
+}
+```
+
+fig1 <- ggplot(data=data,aes(x=date))+geom_line(aes(y=casesMA))+geom_point(aes(y=cases2,group=`Closures/openings`,colour=Closures,alpha=Openings))+ scale_alpha_discrete(range = c(.5, 1),na.translate=F) +scale_x_date(date_labels="%m-%y",date_breaks="2 month")+ ggtitle("Closures and Openings for Quebec") + scale_colour_discrete(na.translate = F)
+
+
+```{r message=FALSE, warning=FALSE}
+fig1 <- ggplot(data=data,aes(x=date))+
+  geom_line(aes(y=cases))+
+  geom_point(aes(y=cases2,group=`Closures/openings`,colour=Closures))+
+  ggtitle("Closures and Openings for Quebec") + 
+  scale_colour_discrete(na.translate = F)+
+  theme(legend.position = c(0.9, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01")))+
+  ylim(0,10000)
+
+fig2 <- ggplot(data=data,aes(x=date))+
+  geom_line(aes(y=cases))+
+  geom_point(aes(y=cases3,colour=Distancing)) + 
+  ggtitle("Distancing for Quebec")+
+  scale_colour_discrete(na.translate = F)+
+  theme(legend.position = c(0.9, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01")))+
+  ylim(0,10000)
+
+ggarrange(fig1,fig2,nrow=2)
+
+```
+
+
+```{r}
+# data <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/data/ca.csv")
+# data$date <- as.Date(data$date,'%d-%m-%Y')
+# d <- data %>% filter(prname=="Quebec")
+# s3 <- read_excel("/Users/oliviashi/Documents/MASTER_RESEARCH/data/covid-19-intervention-scan-data-tables-en.xlsx",sheet=3,col_names=TRUE,skip=2)
+# s3$date <- as.Date(s3$`Start date`)
+# s3$cat <- s3$`Intervention Category`
+# data <- s3 %>% dplyr::select("Entry ID","date","cat","Action","Jurisdiction","Description") %>% filter(Jurisdiction=="Que.")
+# data <- tibble(data)
+# data$Closures <- as.numeric(NA)
+# data$Openings <- as.numeric(NA)
+# s3 %>% filter(cat=="Closures/openings") %>% filter(Jurisdiction=="Que.") %>% filter(Action=="Eased")
+# 
+# #join tables
+# da<-join(d,data,by="date",type="left",match="first")
+# i=1
+# for (i in 1:dim(da)[1]){
+# if (isTRUE(da$Action[i] == "New") && isTRUE(da$cat[i]=="Closures/openings")) {
+# da$Closures[i] <- da$cases[i]}
+# else if (isTRUE(data$Action[i] == "Eased") && isTRUE(da$cat[i]=="Closures/openings")){
+# da$Openings[i] <- da$cases[i]}}
+# 
+# # ggplot(data=da,aes(x=date))+geom_line(aes(x=date,y=casesMA),col="blue") +  geom_point(aes(y=as.numeric(`Closures`),col="Closures")) + geom_point(aes(y=as.numeric(`Openings`),col="Openings")) + ggtitle(sprintf("cases and intervention plot for %s",d$prname))
+```
+
+
+
+
+
+
+
+
+
+
+
+

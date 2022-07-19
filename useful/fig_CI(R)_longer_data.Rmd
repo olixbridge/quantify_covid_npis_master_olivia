@@ -1,0 +1,284 @@
+```{r message=FALSE, warning=FALSE}
+library(lubridate)
+library(dplyr)
+library(EpiEstim)
+library(tidyverse)
+library(zoo)
+library(ggplot2)
+library(reshape2)
+library(ggpubr)
+cases<-read.csv('/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/cases_timeseries_prov.csv')%>% select(province,date_report,cases) %>% filter(province=='Quebec')
+names(cases)[2]<-"date"
+testing<-read.csv('/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/testing_timeseries_prov.csv')  %>% filter(province=='Quebec') %>% select(date_testing,testing,cumulative_testing)
+names(testing)[1]<-"date"
+
+data=merge(x=cases,y=testing,by="date")
+data$date <- as.Date(data$date,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+for(i in 1:dim(data)[1]){
+  if(data$testing[i]==0){
+    data$testing[i]=data$testing[i-1]
+  }}
+data$cases[1]=1000
+for(i in 1:dim(data)[1]){
+  if(data$cases[i]<=0){
+    data$cases[i]=data$cases[i-1]
+  }}
+
+findPositivityRate <- function(x,y){
+  res <- 0
+  for(i in 1:length(x)){res[i] <- ifelse(x[i]<y[i],x[i]/y[i],1)}
+  return(res)
+}
+data$positivity <- findPositivityRate(data$cases,data$testing)
+
+data<-data %>% arrange(date)
+
+findDayi <- function(x){
+  res<-0
+  for(i in 1:length(x)){res<-difftime(x,as.Date("2020-03-15"),units="days")}
+  return(as.numeric(res))
+}
+data$dayi<-findDayi(data$date)
+
+for(i in 1:length(data$dayi)){
+  data$prevalence[i] <- (1500 / (data$dayi[i] + 50)) * (data$positivity[i])^(0.5) + 2
+  data$a[i] <- 1500 / (data$dayi[i] + 50)}
+
+data$trueNewDailyInfections <- data$cases * data$prevalence
+for(i in 2:dim(data)[1]){
+  if(is.nan(data$trueNewDailyInfections[i])|data$trueNewDailyInfections[i]==0.0000){
+    data$trueNewDailyInfections[i]=data$trueNewDailyInfections[i-1]}}
+for(i in 10:dim(data)[1]){
+  if(data$trueNewDailyInfections[i]>data$trueNewDailyInfections[i-1]+data$trueNewDailyInfections[i-2]+data$trueNewDailyInfections[i-3]*0.5){
+    data$trueNewDailyInfections[i]=data$trueNewDailyInfections[i-1]*1.4
+    data$trueNewDailyInfections[i-1]=data$trueNewDailyInfections[i-2]*1.4
+    data$trueNewDailyInfections[i-2]=data$trueNewDailyInfections[i-3]*1.4}
+}
+fig1<-ggplot(data=data,aes(date)) +
+      geom_point(aes(y = cases, colour = "Reported cases")) + 
+      geom_point(aes(y = trueNewDailyInfections, colour = "Actual cases")) + 
+      ggtitle("Actual vs. reported cases for Quebec") +theme(legend.position = c(0.8, 0.8)) 
+```
+
+
+
+```{r message=FALSE, warning=FALSE}
+data$active_cases<-data$cases
+listallI<-list()
+listallR<-list()
+listallI[1]<-list(data$active_cases)
+#min squared error function for the first iteration
+minRSS_for_first_iteration<-function(par,case){
+  mean_w=par[1]
+  std_w=par[2]
+  if(min(par)<1){return(1e100)}
+  else{
+    das<-find_baseline_poisson_case(mean_w,std_w)
+    das<-pmax(0,das)
+    return(min(1e100,0.001*sum((case-das)^2)/length(case)))}}
+
+
+# find the baseline (the first iteration and record the case counts)
+find_baseline_poisson_case<-function(mean_w,std_w){
+  alpha = (mean_w^2)/std_w
+  beta = std_w/mean_w 
+  si_dist = "G"
+  incid_sim=listallI[1][[1]]
+  res_i <- estimate_R(incid_sim, method = "parametric_si",
+            config = make_config(list(mean_si = mean_w,std_si = std_w,
+              mean_prior = 2.6,std_prior = 2)))
+  R_val<-res_i$R$`Mean(R)`
+  listallR[1]<-list(R_val)
+  n=length(data$active_cases)
+  I=c(1,n)
+  I[1]=incid_sim[1]
+  w<-dgamma(x = 1:n, shape = alpha, rate = 1/beta)
+  for (t in 2:n) {
+    poisson_mean=0
+    for(s in 1:(t-1)){poisson_mean=poisson_mean+R_val[t-s]*I[t-s]*w[s]}
+    I[t]=poisson_mean
+    if(is.na(I[t])){I[t]=I[t-1]}}
+  return(I)
+}
+
+
+optim_par_original<-optim(par=c(4.575190,1.920921),minRSS_for_first_iteration,case=data$active_cases,method="BFGS",control = list(maxit=500,trace=10))
+baseline<-list(find_baseline_poisson_case(optim_par_original$par[1],optim_par_original$par[2]))
+
+df<-data.frame(actua_cases=seq(1,dim(data)[1],1),simulated_infections=seq(1,dim(data)[1],1),date=data$date)
+for(i in 1:dim(data)[1]){
+  df$actua_cases[i]=data$cases[i]
+  df$simulated_infections[i]=baseline[[1]][i]
+}
+fig2<-ggplot(data=df,aes(x=date))+geom_point(aes(y=actua_cases, colour = "Actual cases"))+geom_point(aes(y=simulated_infections, colour = "Simulated cases"))+ ylab("cases")+
+      ggtitle("Actual vs. Simulated cases for Quebec") +theme(legend.position = c(0.8, 0.8)) 
+#ggarrange(fig1,fig2,nrow=2)
+```
+
+```{r message=FALSE, warning=FALSE}
+optim_par_original<-optim(par=c(3,1.720921),minRSS_for_first_iteration,case=data$active_cases,method="BFGS",control = list(maxit=500,trace=10))
+baseline<-list(find_baseline_poisson_case(optim_par_original$par[1],optim_par_original$par[2]))
+
+df<-data.frame(actua_cases=seq(1,dim(data)[1],1),baseline=seq(1,dim(data)[1],1),date=data$date)
+for(i in 1:dim(data)[1]){
+  df$actua_cases[i]=data$active_cases[i]
+  df$baseline[i]=baseline[[1]][i]
+}
+ggplot(data=df,aes(x=date))+geom_point(aes(y=actua_cases, colour = "Actual cases"))+geom_point(aes(y=baseline, colour = "Simulated cases"))+ ylab("cases")+
+      ggtitle("Actual vs. Simulated cases for Quebec") +theme(legend.position = c(0.8, 0.8)) 
+```
+
+
+
+
+```{r}
+list_mean_w<-list()
+list_std_w<-list()
+num=5
+
+#find listallR[1]
+mean_w=optim_par_original$par[1]
+std_w=optim_par_original$par[2]
+alpha = (mean_w^2)/std_w
+beta = std_w/mean_w 
+incid_sim=listallI[1][[1]]
+res_i <- estimate_R(incid_sim, method = "parametric_si",
+          config = make_config(list(mean_si = mean_w,std_si = std_w,
+            mean_prior = 2.6,std_prior = 2)))
+R_val<-res_i$R$`Mean(R)`
+listallR[1]<-list(R_val)
+
+
+
+#initiating functions to use
+min.RSS<-function(case,par){
+  if(min(par)<1){return(1e100)}else{
+    das<-pmax(0,find_poisson_case(par[1],par[2]))
+    return(min(1e100,0.01*sum((case-das)^2)/length(case)))}
+}
+
+#to find the fitted parameters
+find_poisson_case<-function(mean_w,std_w){
+  alpha = (mean_w^2)/std_w #2.74
+  beta = std_w/mean_w #0.985
+  n=length(data$active_cases)
+  I=c(1,n)
+  I[1]=baseline[[1]][1]
+  w<-dgamma(x = 1:n, shape = alpha, rate = 1/beta)
+  for (t in 2:n) {
+    poisson_mean=0
+    for(s in 1:(t-1)){poisson_mean=poisson_mean+R_val[t-s]*I[t-s]*w[s]}
+    ifelse(is.na(poisson_mean),I[t]<-I[t-1],I[t]<-poisson_mean)}
+  return(I)}
+
+simulate_forward<-function(mean_w,std_w){
+  alpha = (mean_w^2)/std_w #2.74
+  beta = std_w/mean_w #0.985
+  n=length(data$active_cases)
+  I=c(1,n)
+  I[1]=baseline[[1]][1]
+  w<-dgamma(x = 1:n, shape = alpha, rate = 1/beta)
+  for (t in 2:n) {
+    poisson_mean=0
+    for(s in 1:(t-1)){poisson_mean=poisson_mean+R_val[t-s]*I[t-s]*w[s]}
+    I[t]=rpois(1, lambda=poisson_mean) #only parameter is R_val
+    if(is.na(I[t])){I[t]=I[t-1]}}
+  return(I)}
+
+list_mean_w[1]=optim_par_original$par[1]
+list_std_w[1]=optim_par_original$par[2]
+alpha = (list_mean_w[[1]]^2)/list_std_w[[1]]
+beta = list_std_w[[1]]/list_mean_w[[1]]
+
+for(i in 2:num){
+  #new simulated data 
+  R_val<-listallR[1][[1]]
+  listallI[i]<-list(simulate_forward(mean_w=list_mean_w[1][[1]],std_w=list_std_w[1][[1]]))
+  incid_sim=listallI[i][[1]]
+  res_i <- estimate_R(incid_sim, method = "parametric_si",
+          config = make_config(list(
+            mean_si = list_mean_w[[1]],
+            std_si = list_std_w[[1]],
+            mean_prior=2.6,std_prior=2)))
+  #each student is fitting their own data
+  op<-optim(par=c(list_mean_w[1][[1]],list_std_w[1][[1]]),min.RSS,case=incid_sim,method="L-BFGS-B")[1][[1]]
+  listallR[i]<-list(res_i$R$`Mean(R)`)
+  list_mean_w[i]<-op[1]
+  list_std_w[i]<-op[2]
+}
+
+# plot(x=seq(1, length(baseline[[1]]),1),y=baseline[[1]],type="l",lwd=3,col="red",main="Infections with optimal alpha,beta",xlab="days",ylab="cases",ylim=c(0,1e4))
+# lines(x=seq(1, length(data$active_cases), 1),y=data$active_cases,type="l",lwd=3,col="green")
+# for(i in 2:num){
+# lines(x=seq(1, length(listallI[[i]]), 1),y=listallI[[i]],type="l",col=i)
+
+```
+
+
+
+
+
+```{r}
+n=length(data$active_cases)-7
+dfr<-data.frame(actual=seq(1,n,1),
+               lower=seq(1,n,1),
+               upper=seq(1,n,1),
+               days=data$date[1:n])
+df<-data.frame(actual=seq(1,n,1),
+               lower=seq(1,n,1),
+               upper=seq(1,n,1),
+               days=data$date[1:n])
+               # days=data$date_active[1:n])
+for(i in 1:n){
+  new<-list()
+  newr<-list()
+  for(j in 1:num){
+    new[j]=(listallI[[j]][[i]])
+    newr[j]=(listallR[[j]][[i]])
+  }
+  dfr$actual[i]=listallR[[1]][i]
+  dfr$lower[i]=quantile(unlist(newr),prob=c(0.025,0.975))[[1]]
+  dfr$upper[i]=quantile(unlist(newr),prob=c(0.025,0.975))[[2]]
+  df$actual[i]=data$active_cases[i]
+  df$lower[i]=quantile(unlist(new),prob=c(0.025,0.975))[[1]]
+  df$upper[i]=quantile(unlist(new),prob=c(0.025,0.975))[[2]]
+}
+
+fig3<-ggplot(df,aes(x=days))+geom_point(aes(y=actual),cex=0.5) + theme(legend.position = c(0.8, 0.8))+ylab("cases")+geom_line(aes(y=lower,col="lower"))+geom_line(aes(y=upper,col="upper")) +ylim(0,1e4)+ggtitle("Confidence Interval for cases") + labs(colour="Confidence Interval")+theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())
+
+fig4<-ggplot(dfr,aes(days))+geom_point(aes(y=actual),cex=0.5) + theme(legend.position = c(0.8, 0.8))+ylab(expression("R"[t]))+geom_line(aes(y=lower,col="lower"))+geom_line(aes(y=upper,col="upper"))+labs(colour="Confidence Interval") +ylim(0,3)+ggtitle(expression("Confidence Interval for R"[t])) + theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())#,legend.background=element_blank())
+
+ggarrange(fig3,fig4,nrow=2)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,193 @@
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(anytime) 
+library(gridExtra)
+library(plyr)
+library(EpiEstim)
+library(zoo)
+```
+
+
+```{r}
+ca_test <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_canada/testing_timeseries_canada.csv")
+ca_cases <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_canada/cases_timeseries_canada.csv")
+ca_mortality <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_canada/mortality_timeseries_canada.csv")
+n=length(ca_test$province) #477 -> 366 ?
+data <- data.frame(date=c(rep(NA,n)),tests=c(rep(NA,n)),cases=c(rep(NA,n)))
+data$date <- as.Date(ca_cases$date_report[1:n],'%d-%m-%Y')
+data$tests <- ca_test$testing[1:n]
+data$cases <- ca_cases$cases[1:n]
+data$deaths <- ca_mortality$deaths[1:n]
+data_po <- data.frame(date=c(rep(NA,n)),positivity=c(rep(NA,n)))
+data_po$positivity <- data$cases / data$tests
+data_po$date <- data$date
+data<-join(data,data_po,by="date",type="left",match="first")
+data$positivityMA  <- rollmean(data$positivity,14,fill=NA)
+myfunc <- function(df,x,y){df[df$date >= x & df$date <= y,]}
+# data <- myfunc(data,as.Date("2020-04-01"),as.Date("2021-04-01"))  
+findDayi <- function(x){res<-0
+  for(i in 1:length(x)){res<-difftime(x,as.Date("2020-03-15"),units="days")}
+  return(as.numeric(res))}
+data$dayi<-findDayi(data$date)
+
+for(i in 1:length(data$dayi)){
+  data$prevalence[i] <- (1500 / (data$dayi[i] + 50)) * (data$positivity[i])^(0.5) + 2
+  data$a[i] <- 1500 / (data$dayi[i] + 50)}
+
+data$casesPR <- data$cases * data$prevalence
+data$casesPR[1]<-0
+for(i in 2:n){
+  if(is.finite(data$casesPR[i])){
+    a<-1
+  }else{
+    data$casesPR[i]<-data$casesPR[i-1]
+  }
+}
+
+# ggplot(data=data,aes(x=date,y=positivityMA))+geom_line()
+# ggplot(data=data,aes(date)) +
+#       geom_line(aes(y = rollmean(cases,14,fill=NA), colour = "Reported cases")) +
+#       geom_line(aes(y = rollmean(trueNewDailyInfections,14,fill=NA), colour = "Adjusted cases")) +
+#   ggtitle("Adjusted vs. reported cases for Canada")
+# ggplot(data=data,aes(date)) +
+#       geom_line(aes(y = prevalence, group=prname, colour = prname)) +
+#   ggtitle("Prevalence rate for each province in Canada")
+# ggplot(data=data,aes(date)) +
+#       geom_line(aes(y = positivity, group=prname, colour = prname)) +
+#   ggtitle("Posivity rate for each province in Canada")
+
+data$casesSmooth <- rollmean(data$cases,14,fill=NA)
+d<-data
+# Main algorithm
+T.t <- length(d$casesSmooth)
+f.od <- function(x) dgamma(x, shape = 40, rate = 2)   # mean = 20 days, sd = 10 days      
+f.io <- function(y) dgamma(y, shape = 6.5^2/2.6, rate = 6.5/2.6)   # mean = 6.5 days, sd = 2.6 days
+# convolution integral
+f.id <- Vectorize(function(z) integrate(function(y,z) f.od(z-y)*f.io(y),-Inf,Inf,z)$value)
+p.id <- Vectorize(function(q) integrate(f.id, 0, q)$value)
+pr.id <- diff(p.id(0:45))
+pr.id <- pr.id / sum(pr.id)
+# Delay distribution
+T.t <- length(d$cases)
+T.id <- length(pr.id)
+pr.id.mat <- matrix(0, nrow = T.t, ncol = T.t+T.id-1)
+for (j in 1:T.t) {
+  pr.id.mat[j, j:(j+T.id-1)] <- rev(pr.id)}
+q <- colSums(pr.id.mat)
+# EM algorithm
+D <- d$deaths
+lambda <- rep(2, T.t+T.id-1)
+lambda[20:(20+T.t-1)] <- D
+p.mat <- pr.id.mat
+chi2 <- c()
+for (ite in 1:100) {
+  lambda.hat <- lambda * q
+  D.exp <- p.mat %*% lambda
+  chi2[ite] <- 1/length(D) * sum((D.exp - D)^2 / D.exp)
+  if (chi2[ite] < 1) {
+    return(lambda)
+    print(ite)}
+  else {lambda <- lambda / q * t(p.mat) %*% (D / D.exp)}}
+d$lambda <- lambda[1:(n)]
+getLOESSCases <- function(dates, count_data, days_incl = 21, degree = 1,
+                          truncation = 0) {
+  if (truncation != 0) {
+    dates <- dates[1:(length(dates) - truncation)]
+    count_data <- count_data[1:(length(count_data) - truncation)]}
+  n_points <- length(unique(dates))
+  sel_span <- days_incl / n_points
+  n_pad <- round(length(count_data) * sel_span * 0.5)
+  c_data <- data.frame(value = c(rep(0, n_pad), count_data),
+                       date_num = c(seq(as.numeric(dates[1]) - n_pad, as.numeric(dates[1]) - 1),
+                                    as.numeric(dates)))
+  c_data.lo <- loess(value ~ date_num, data = c_data, span = sel_span, degree = degree)
+  smoothed <- predict(c_data.lo)
+  smoothed[smoothed < 0] <- 0
+  raw_smoothed_counts <- smoothed[(n_pad + 1):length(smoothed)]
+  normalized_smoothed_counts <- round(
+    raw_smoothed_counts * sum(count_data, na.rm = T) / sum(raw_smoothed_counts, na.rm = T))
+  if (truncation != 0) {
+    normalized_smoothed_counts <- append(normalized_smoothed_counts, rep(NA, truncation))}
+  return(normalized_smoothed_counts)
+}
+d$lambda <- lambda[1:n]
+d$smooth <- getLOESSCases(d$date,d$cases)
+d$casesSmooth <- getLOESSCases(d$date,d$cases)
+d$deathsSmooth <- getLOESSCases(d$date,d$deaths)
+d$lambdaSmooth <- getLOESSCases(d$date,d$lambda)
+d$casesPRr<-getLOESSCases(d$date,d$casesPR)
+for(i in 1:length(d$date)){
+  if(d$cases[i]==0){
+    d$cases[i]<-d$cases[i-1]
+  }
+  d$ifr[i] <-d$deathsSmooth[i]/d$casesSmooth[i]
+  i=i+1}
+
+for(i in 1:length(d$date)){
+  d$trueInfection[i] <- d$lambdaSmooth[i]/(d$ifr[i])
+  i=i+1}
+
+d$casesRC <- d$trueInfection
+
+final_df <- d %>% dplyr::select(date,casesRC,casesPRr)
+df_figure<-join(data,final_df,by="date",type="left",match="first")
+head(data)
+
+comparison_true_new_daily_infections<-ggplot(data=df_figure,aes(x=date)) + geom_point(aes(y=cases,col="Reported cases"),cex=0.5)+  
+  geom_line(aes(y=casesPRr,col="Prevalence Ratio"))+ geom_line(aes(y=casesRC,col="Richardson-Lucy"))+
+  scale_x_date(breaks = "2 months", date_labels = "%b %Y",limits = as.Date(c("2020-04-01","2021-12-01")))+ 
+  theme(legend.position = c(0.85, 0.8),legend.text = element_text(size = 7),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())+
+  theme(aspect.ratio=0.3,legend.background=element_rect(fill = alpha("white", 0.5)),legend.position = c(0.9, 0.8),legend.title = element_blank(),legend.text = element_text(size = 10),legend.key.size=unit(0.5,"lines"),legend.key = element_blank(),axis.title.x=element_blank())+
+  ylab("Adjusted cases")
+
+comparison_true_new_daily_infections
+
+
+ggsave("../LatexImages/comparison_true_new_daily_infections.png",comparison_true_new_daily_infections)
+knitr::plot_crop("../LatexImages/comparison_true_new_daily_infections.png")
+```
+
+
+
+
+```{r}
+# ggplot(data=d,aes(x=date))+
+#   geom_line(aes(y=lambda,col="lambda"))+geom_line(aes(y=lambdaSmooth,col="Smothed lambda")) +
+#   ggtitle("lambda vs. smoothed lambda")
+# ggplot(data=d,aes(x=date,y=ifr))+geom_point()
+# ggplot(data=d,aes(x=date))+geom_line(aes(y=trueInfection,col="Smoothed Infection"))+geom_line(aes(y=cases,col="cases"))
+# #spike for the green is delayed -> to adjust it i have to use deconvolution filter
+# ggplot(data=d,aes(x=date)) + geom_line(aes(y=d$deathsSmooth,col="deathSmooth"))+ geom_line(aes(y=d$casesSmooth/36,col="casesSmooth"))
+# #infection to confirmation delay 
+# ggplot(data=d,aes(x=date)) + geom_line(aes(y=d$cases,col="Reported cases"))+ geom_line(aes(y=d$casesSmooth,col="Smoothed cases"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

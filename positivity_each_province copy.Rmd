@@ -1,0 +1,136 @@
+
+```{r}
+#fig1
+ca_cases <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/cases_timeseries_prov.csv") %>% select("Alberta","BC","Manitoba","New Brunswick","NL","PEI","Nova Scotia","Ontario","Quebec","Saskatchewan")
+names(ca_cases)[2]<-"date"
+ca_cases$date<-as.Date(ca_cases$date,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+ca_cases %>% arrange(date)
+ca_cases <-ca_cases %>% filter(date>"2020-01-01")
+ggplot(data=ca_cases,aes(x=date)) +
+      geom_point(aes(y = cases),size=0.3) + 
+      facet_wrap(province ~ .,scales="free_y") +
+      scale_x_date(date_labels = "%b/%y")+
+  theme(axis.text.x = element_text(angle=45, hjust = 1))+
+  ggtitle("Reported cases for each province in Canada")
+```
+
+
+
+```{r}
+ca_test <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/testing_timeseries_prov.csv")
+
+ca_cases <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/cases_timeseries_prov.csv")
+
+ca_mortality <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/mortality_timeseries_prov.csv")
+
+n=length(ca_test$province) 
+ca_cases$date<-as.Date(ca_cases$date_report,format="%d-%m-%Y", tryFormats= "%Y-%m-%d") 
+ca_test$date<-as.Date(ca_test$date_testing,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+
+ca_cases$casesMA<-rollmean(ca_cases$cases,14,fill=NA)
+ca_test$testingMA<-rollmean(ca_test$testing,14,fill=NA)
+
+for(i in 3:n){
+  if(is.finite(ca_test$testingMA[i])){
+    a<-3
+  }else{ca_test$testingMA[i]<-ca_test$testingMA[i-1]}
+}
+
+d<-join(ca_cases,ca_test,by=c("date","province"),type="left",match="first")
+myfunc <- function(df,x,y){df[df$date >= x & df$date <= y,]}
+d <- myfunc(d,as.Date("2020-04-01"),as.Date("2021-07-01"))
+n=length(d$province)
+data_po <- data.frame(date=c(rep(NA,n)),positivity=c(rep(NA,n)),province=c(rep(NA,n)))
+data_po$date <- d$date
+data_po$province <- d$province
+
+for(i in 1:length(d$casesMA)){
+  data_po$positivity[i] <-ifelse(d$casesMA[i]<d$testingMA[i],
+                                 d$casesMA[i]/d$testingMA[i],
+                                 d$casesMA[i-1]/d$testingMA[i-1])
+  data_po$positivity[i]<-max(0,data_po$positivity[i])}
+
+
+data<-join(d,data_po,by=c("date","province"),type="left",match="first")
+
+data$positivityMA  <- rollmean(data$positivity,14,fill=NA)
+data<-data%>%filter(province!="NWT" &province!="Repatriated"&province!="Nunavut"&province!="Yukon")
+
+data$province[data$province=="Newfoundland and Labrador"]<-"NL"
+data$province[data$province=="Prince Edward Island"]<-"PEI"
+data$province[data$province=="British Columbia"]<-"BC"
+data$province[data$province=="New Brunswick"]<-"NB"
+data$province[data$province=="Alberta"]<-"AB"
+data$province[data$province=="Nova Scotia"]<-"NS"
+data$province[data$province=="Manitoba"]<-"MB"
+data$province[data$province=="Saskatchewan"]<-"SK"
+data$province[data$province=="Quebec"]<-"QC"
+data$province[data$province=="Ontario"]<-"ON"
+
+positivity_each_province<-ggplot(data=data,aes(date)) +
+  geom_line(aes(y = positivityMA, group=province, colour = province)) +
+  scale_x_date(breaks = "2 months", date_labels = "%b %Y")+
+  theme(aspect.ratio=0.7,
+          legend.title =element_blank(),
+          axis.title.x=element_blank())+
+  ylab("Positivity")
+
+
+ggsave("./LatexImages/positivity_each_province.png",positivity_each_province,scale=1)
+knitr::plot_crop("./LatexImages/positivity_each_province.png")
+
+```
+
+
+
+
+
+
+
+```{r}
+data <- data.frame(date=c(rep(NA,n)),tests=c(rep(NA,n)),cases=c(rep(NA,n)),province=c(rep(NA,n)))
+data$date <- as.Date(ca_cases$date_report[1:n],'%d-%m-%Y')
+data$province<-ca_test$province[1:n]
+data$tests <- ca_test$testing[1:n]
+data$cases <- ca_cases$cases[1:n]
+data$deaths <- ca_mortality$deaths[1:n]
+data_po <- data.frame(date=c(rep(NA,n)),positivity=c(rep(NA,n)))
+data_po$positivity <- data$cases / data$tests
+data_po$date <- data$date
+data<-join(data,data_po,by="date",type="left",match="first")
+data$positivityMA  <- rollmean(data$positivity,14,fill=NA)
+myfunc <- function(df,x,y){df[df$date >= x & df$date <= y,]}
+# data <- myfunc(data,as.Date("2020-04-01"),as.Date("2021-04-01"))  
+findDayi <- function(x){res<-0
+  for(i in 1:length(x)){res<-difftime(x,as.Date("2020-03-15"),units="days")}
+  return(as.numeric(res))}
+data$dayi<-findDayi(data$date)
+
+for(i in 1:length(data$dayi)){
+  data$prevalence[i] <- (1500 / (data$dayi[i] + 50)) * (data$positivity[i])^(0.5) + 2
+  data$a[i] <- 1500 / (data$dayi[i] + 50)}
+
+data$casesPR <- data$cases * data$prevalence
+data$casesPR[1]<-0
+for(i in 2:n){
+  if(is.finite(data$casesPR[i])){
+    a<-1
+  }else{
+    data$casesPR[i]<-data$casesPR[i-1]
+  }
+}
+```
+
+```{r}
+ca_test
+```
+
+
+```{r}
+ggplot(data=data,aes(date)) +
+      geom_line(aes(y = positivity, group=province, colour = province)) +
+  ggtitle("Posivity rate for each province in Canada")
+```
+
+
+

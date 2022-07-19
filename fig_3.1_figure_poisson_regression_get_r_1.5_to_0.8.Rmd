@@ -1,0 +1,133 @@
+```{r}
+library(EpiEstim)
+library(ggpubr)
+library(ggplot2)
+```
+
+
+```{r}
+n=300
+set_mean_w=7#3
+set_var_w=1.1#2.6
+alpha = (set_mean_w^2)/set_var_w
+beta = set_var_w/set_mean_w
+
+w<-dgamma(x = 1:n, shape = alpha, rate = 1/beta)
+#plot(seq(1,n,1),w)
+R_val<-c(rep(1.5,0.5*n),rep(0.8,0.5*n))
+#R_val
+poisson.dist <- list()
+I=c(0,n)
+I[1]=500
+I[2]=500
+
+for (t in 2:n) {
+  poisson_mean=0
+  for(s in 1:t-1){
+    if(s!=0){
+    poisson_mean=poisson_mean+R_val[t-s]*I[t-s]*w[s]
+    }
+  }
+  I[t] = rpois(1, lambda=poisson_mean) #only parameter is R_val
+}
+
+```
+
+
+
+```{r}
+Rt<-0
+rt_prior = c(1, 3)#2.6,2
+si = c(set_mean_w, set_var_w)#5.2,1.7   or 21
+si_dist = "G"
+list1<-list()
+listupper<-list()
+listlower<-list()
+len=n
+incid_sim=I
+res_i <- estimate_R(incid_sim, method = "parametric_si",
+      config = make_config(list(
+        mean_si = si[1],
+        std_si = si[2],
+        mean_prior = rt_prior[1],
+        std_prior = rt_prior[2])))
+obs <- data.frame(dates = seq(1,n-7,1))
+obs$mean <- res_i$R$`Mean(R)`
+obs$lower <- res_i$R$`Quantile.0.05(R)`
+obs$upper <- res_i$R$`Quantile.0.95(R)`
+Rt$rt <- obs$mean
+```
+
+
+```{r message=FALSE, warning=FALSE}
+rt_prior = c(1, 3)#2.6,2
+si = c(set_mean_w, set_var_w)#5.2,1.7   or 21
+si_dist = "G"
+list1<-list()
+listupper<-list()
+listlower<-list()
+len=n
+#Rt<-matrix(nrow=50,ncol=n)
+for (i in 1:50){
+  for (t in 2:n) {
+    poisson_mean=0
+    for(s in 1:(t-1)){
+      if(s!=0){
+      poisson_mean=poisson_mean+R_val[t-s]*I[t-s]*w[s]
+      }
+    }
+    I[t] = rpois(1, lambda=poisson_mean)
+  }
+  incid_sim=I
+  res_i <- estimate_R(incid_sim, method = "parametric_si",
+          config = make_config(list(
+            mean_si = si[1],
+            std_si = si[2],
+            mean_prior = rt_prior[1],
+            std_prior = rt_prior[2])))
+  obs <- data.frame(dates = seq(1,n-7,1))
+  obs$mean <- res_i$R$`Mean(R)`
+  obs$lower <- res_i$R$`Quantile.0.05(R)`
+  obs$upper <- res_i$R$`Quantile.0.95(R)`
+  list1[i] <- list(obs$mean)
+  listlower[i] <- list(obs$upper)
+  listupper[i]<-list(obs$lower)
+}
+```
+
+
+```{r}
+casesdf<-data.frame(days=seq(1,n-7,1),cases=seq(1,n-7,1))
+
+
+df<-data.frame(actual=seq(1,n-7,1),
+               lower=seq(1,n-7,1),
+               upper=seq(1,n-7,1),
+               estimated=seq(1,n-7,1),
+               days=seq(1,n-7,1))
+for (i in 1:n-7){
+  casesdf$cases[i]=I[i]
+  df$actual[i]=R_val[i]
+  df$estimated[i]=list1[[1]][i]
+  df$lower[i]=listlower[[1]][i]
+}
+fig1<-ggplot(data=casesdf,aes(x=days,y=cases))+geom_point()
+
+simulated_vs_estimated_rt<-ggplot(data=df,aes(x=days))+
+  geom_line(aes(y=actual,col="Simulated"),cex=0.5)+
+  geom_line(aes(y=estimated,col="Estimated"),cex=0.5)+
+  ylab(expression(R[t])) +
+  xlab("days")+
+  theme(aspect.ratio=0.3,legend.background=element_rect(fill = alpha("white", 0.5)),legend.position = c(0.9, 0.8),legend.title = element_blank(),legend.text = element_text(size = 10),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())
+
+simulated_vs_estimated_rt
+
+
+ggsave("../LatexImages/simulated_vs_estimated_rt.png",simulated_vs_estimated_rt)
+knitr::plot_crop("../LatexImages/simulated_vs_estimated_rt.png")
+```
+
+
+
+
+

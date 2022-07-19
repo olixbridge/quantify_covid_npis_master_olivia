@@ -1,0 +1,527 @@
+---
+title: "oliv_richardlucy"
+output: html_document
+---
+```{r}
+# install.packages("anytime")
+# install.packages("plyr")
+library(anytime) 
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(plyr)
+library(EpiEstim)
+library(zoo)
+```
+
+```{r}
+ca_test <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/testing_timeseries_prov.csv") %>% filter(province=="Quebec")
+
+ca_cases <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/cases_timeseries_prov.csv") %>% filter(province=="Quebec")
+
+ca_mortality <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/mortality_timeseries_prov.csv") %>% filter(province=="Quebec")
+
+n=length(ca_test$province) 
+ca_cases$date<-as.Date(ca_cases$date_report,format="%d-%m-%Y", tryFormats= "%Y-%m-%d") 
+ca_test$date<-as.Date(ca_test$date_testing,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+ca_mortality$date<-as.Date(ca_mortality$date_death_report,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+
+d<-merge(ca_cases,ca_mortality,by="date")
+for(i in 3:n){
+  if((!is.finite(d$cases[i]))|(d$cases[i]==0)){
+    d$cases[i]<-d$cases[i-1]}
+  if((!is.finite(d$deaths[i]))|(d$deaths[i]==0)){
+    d$deaths[i]<-d$deaths[i-1]}
+}
+
+
+d$casesMA<-rollmean(d$cases,7,fill=NA)
+```
+
+
+
+
+```{r}
+# Main algorithm
+T.t <- length(d$casesSmooth)
+
+f.od <- function(x) dgamma(x, shape = 40, rate = 2)   # mean = 20 days, sd = 10 days      
+f.io <- function(y) dgamma(y, shape = 6.5^2/2.6, rate = 6.5/2.6)   # mean = 6.5 days, sd = 2.6 days
+# convolution integral
+f.id <- function(z) integrate(function(y,z) f.od(z-y)*f.io(y),-Inf,Inf,z)$value
+f.id <- Vectorize(f.id) 
+
+#plot(seq(0.01, 50, 0.01), f.id(seq(0.01, 50, 0.01)), type = 'l', xlab = "Delay (days)", ylab = "Density")
+
+# Next, we perform a discrete approximation to the distribution of $T_{id}$ and compute the probability vector for
+# \[ \theta_t = Pr[T_{id} = t] \quad t = 1, \dots, 45 \]
+p.id <- function(q) integrate(f.id, 0, q)$value
+p.id <- Vectorize(p.id)
+#p.id(Inf)
+
+pr.id <- diff(p.id(0:45))
+#plot(pr.id, xlim = c(0, 45), xlab = "Delay (days)", ylab = "Probability")
+#sum(pr.id)
+pr.id <- pr.id / sum(pr.id)
+
+
+# Delay distribution
+T.t <- length(d$cases)
+pr.id
+T.id <- length(pr.id)
+pr.id.mat <- matrix(0, nrow = T.t, ncol = T.t+T.id-1)
+for (j in 1:T.t) {
+  pr.id.mat[j, j:(j+T.id-1)] <- rev(pr.id)
+}
+
+q <- colSums(pr.id.mat)
+summary(q)
+
+
+# EM algorithm
+D <- d$deaths
+N0 <- length(D)
+lambda <- rep(2, T.t+T.id-1)
+lambda[20:(20+T.t-1)] <- D
+
+p.mat <- pr.id.mat
+chi2 <- c()
+for (ite in 1:100) {
+  lambda.hat <- lambda * q
+  #D.exp <- phat.mat %*% lambda.hat
+  D.exp <- p.mat %*% lambda
+  chi2[ite] <- 1/N0 * sum((D.exp - D)^2 / D.exp)
+  if (chi2[ite] < 1) {
+    return(lambda)
+    print(ite)
+  }
+  else {
+    lambda <- lambda / q * t(p.mat) %*% (D / D.exp)
+  }
+}
+
+d$lambda <- lambda[1:length(d$date)]
+```
+
+Smooth lambda using loess()
+```{r}
+# ---- Smoothing the lambda ----
+getLOESSCases <- function(dates, count_data, days_incl = 21, degree = 1,
+                          truncation = 0) {
+  if (truncation != 0) {
+    dates <- dates[1:(length(dates) - truncation)]
+    count_data <- count_data[1:(length(count_data) - truncation)]
+  }
+  n_points <- length(unique(dates))
+  sel_span <- days_incl / n_points
+  n_pad <- round(length(count_data) * sel_span * 0.5)
+  c_data <- data.frame(value = c(rep(0, n_pad), count_data),
+                       date_num = c(seq(as.numeric(dates[1]) - n_pad, as.numeric(dates[1]) - 1),
+                                    as.numeric(dates)))
+  c_data.lo <- loess(value ~ date_num, data = c_data, span = sel_span, degree = degree)
+  smoothed <- predict(c_data.lo)
+  smoothed[smoothed < 0] <- 0
+  raw_smoothed_counts <- smoothed[(n_pad + 1):length(smoothed)]
+  normalized_smoothed_counts <- round(
+    raw_smoothed_counts * sum(count_data, na.rm = T) / sum(raw_smoothed_counts, na.rm = T))
+  if (truncation != 0) {
+    normalized_smoothed_counts <- append(normalized_smoothed_counts, rep(NA, truncation))
+  }
+  return(normalized_smoothed_counts)
+}
+```
+
+
+
+plot the smooth
+```{r}
+for(i in 3:n){
+  if(d$lambda[i]<=3){
+    d$lambda[i]<-d$lambda[i-1]+rnorm(1,1,2)}
+}
+
+d$lambdaRM <- rollmean(d$lambdaRM,14,fill=NA)
+d$lambdaSmooth <- smooth(d$lambda)
+d$lambdaLoess <- getLOESSCases(d$date,d$lambda)
+smooth_lambda_comparison<-ggplot(data=d,aes(x=date))+
+  geom_point(aes(y=lambda),cex=0.5) +
+  geom_line(aes(y=lambdaSmooth,col="Smooth")) +
+  geom_line(aes(y=lambdaLoess,col="Loess")) +
+  geom_line(aes(y=lambdaRM,col="Rollmean")) +
+  ylab("Lambda")+
+  theme(aspect.ratio=0.3,
+        legend.background=element_rect(fill = alpha("white", 0.5)),
+        legend.position = c(0.9, 0.8),legend.title = element_blank(),
+        legend.text = element_text(size = 10),legend.key.size=unit(0.5,"lines"),
+        legend.key = element_blank(),axis.title.x=element_blank())+
+  scale_x_date(breaks = "2 months", date_labels = "%b/%y",limits = as.Date(c("2020-04-01","2021-12-01")))+scale_fill_discrete(name = NULL)+
+  ylim(0,175)
+
+
+smooth_lambda_comparison
+ggsave("../LatexImages/smooth_lambda_comparison.png",smooth_lambda_comparison)
+knitr::plot_crop("../LatexImages/smooth_lambda_comparison.png")
+```
+```{r}
+# ggplot(data=d,aes(x=date))+
+#   geom_line(aes(y=lambda,col="lambda"))+
+#   geom_line(aes(y=lambdaRM,col="lambda rollmean")) +
+#   ggtitle("lambda vs. smoothed lambda")
+
+
+#head(d)
+ggplot(data=d,aes(x=date))+geom_line(aes(y=deathsSmooth,col="LOESS"))+geom_line(aes(y=deathsMA,col="MA"))
+
+```
+
+
+
+
+```{r}
+# plot 
+d$smooth <- getLOESSCases(d$date,d$cases)
+d$casesSmooth <- getLOESSCases(d$date,d$cases)
+d$deathsSmooth <- getLOESSCases(d$date,d$deaths)
+#fig1<-ggplot(data=d,aes(x=date,y=smooth))+geom_point()
+d$lambda <- lambda[1:488]
+d$lambdaSmooth <- getLOESSCases(d$date,d$lambda)
+ggplot(data=d,aes(x=date))+
+  geom_line(aes(y=lambda,col="lambda"))+geom_line(aes(y=lambdaSmooth,col="Smothed lambda")) +
+  ggtitle("lambda vs. smoothed lambda")
+
+i=1
+for(i in 1:length(d$date)){
+  if(d$cases[i]==0){
+    d$cases[i]<-d$cases[i-1]
+  }
+  d$ifr[i] <-d$deathsSmooth[i]/d$casesSmooth[i]
+  i=i+1
+}
+
+
+# d$ifr <- getLOESSCases(d$date,d$ifr)
+
+i=1
+for(i in 1:length(d$date)){
+  d$trueInfection[i] <- d$lambdaSmooth[i]/(d$ifr[i])
+  i=i+1
+}
+ggplot(data=d,aes(x=date,y=ifr))+geom_point()
+ggplot(data=d,aes(x=date))+geom_line(aes(y=trueInfection,col="Smoothed Infection"))+geom_line(aes(y=cases,col="cases"))
+#spike for the green is delayed -> to adjust it i have to use deconvolution filter
+ggplot(data=d,aes(x=date)) + geom_line(aes(y=d$deathsSmooth,col="deathSmooth"))+ geom_line(aes(y=d$casesSmooth/36,col="casesSmooth"))
+#infection to confirmation delay 
+ggplot(data=d,aes(x=date)) + geom_line(aes(y=d$cases,col="Reported cases"))+ geom_line(aes(y=d$casesSmooth,col="Smoothed cases"))
+```
+
+
+```{r}
+T.t <- length(d$cases)
+
+#infection to death takes 26.5 days on average
+f.od <- function(x) dgamma(x, shape = 40, rate = 2)   # mean = 20 days, sd = 10 days      
+f.io <- function(y) dgamma(y, shape = 6.5^2/2.6, rate = 6.5/2.6)   # mean = 6.5 days, sd = 2.6 days
+# convolution integral
+f.id <- function(z) integrate(function(y,z) f.od(z-y)*f.io(y),-Inf,Inf,z)$value
+f.id <- Vectorize(f.id) 
+
+p.id <- function(q) integrate(f.id, 0, q)$value
+p.id <- Vectorize(p.id)
+#p.id(Inf)
+
+pr.id <- diff(p.id(0:45))
+#plot(pr.id, xlim = c(0, 45), xlab = "Delay (days)", ylab = "Probability")
+#sum(pr.id)
+pr.id <- pr.id / sum(pr.id)
+
+#assumption: when someone get infected, its not determined at that point if its just a case or if they die
+
+# Delay distribution
+# infection to case takes only 10 days on average
+pr.ir <- diff(pgamma(0:45, shape = 21, rate = 1))
+plot(pr.ir, xlim = c(0, 45), xlab = "Days", ylab = "Probability")
+#sum(pr.ir)
+pr.ir <- pr.ir / sum(pr.ir)
+
+
+T.t <- length(d$deaths)
+pr.ir
+T.ir <- length(pr.ir)
+pr.ir.mat <- matrix(0, nrow = T.t, ncol = T.t+T.ir-1)
+for (j in 1:T.t) {
+  pr.ir.mat[j, j:(j+T.ir-1)] <- rev(pr.ir)
+}
+
+q <- colSums(pr.ir.mat)
+summary(q)
+
+# EM algorithm
+D <- d$deaths
+N0 <- length(D)
+lambda2 <- rep(2, T.t+T.ir-1)
+lambda2[20:(20+T.t-1)] <- D
+
+p.mat <- pr.ir.mat
+chi2 <- c()
+for (ite in 1:100) {
+  lambda2.hat <- lambda2 * q
+  #D.exp <- phat.mat %*% lambda.hat
+  D.exp <- p.mat %*% lambda2
+  chi2[ite] <- 1/N0 * sum((D.exp - D)^2 / D.exp)
+  if (chi2[ite] < 1) {
+    return(lambda2)
+    print(ite)
+  }
+  else {
+    lambda2 <- lambda2 / q * t(p.mat) %*% (D / D.exp)
+  }
+}
+
+d$lambda2 <- lambda2[1:488]
+#prob weight attached to each 
+#death on day t are comprised of infections that happened over range of days
+#for death on day t, the most likely a person got infected was 20 days before (10-33)
+```
+
+```{r}
+ggplot(data=d[60:488],aes(x=date))+geom_line(aes(y=lambda,col="lambda cases"))+geom_line(aes(y=lambda2,col="lambda deaths"))
+```
+ifr = death/case
+
+
+
+```{r}
+ggplot(data=d[60:488],aes(x=date))+geom_line(aes(y=cases/36,col="lambda cases"))+geom_line(aes(y=deaths,col="lambda death"))
+```
+
+
+
+```{r}
+incid$I <- data.frame(d$casesSmooth)
+incid_sim$I <-d$casesSmooth
+t_start = as.Date("2020-06-01")
+t_end = as.Date("2021-06-01")
+  si = c(5.2, 1.7)
+  rt_prior = c(2.6, 2)
+res_i <- estimate_R(incid_sim, method = "parametric_si",
+                    config = make_config(list(
+                      t_start = t_start,
+                      t_end = t_end,
+                      mean_si = si[1],
+                      std_si = si[2],
+                      mean_prior = rt_prior[1],
+                      std_prior = rt_prior[2])))
+```
+
+
+
+
+
+
+```{r}
+data <- read.csv("/Users/oliviashi/Documents/MASTER_RESEARCH/interventionsQC.csv")
+data$date <- anydate(data$Date)
+policy <- data %>% dplyr::select(date,Intervention.category,Intervention.type,Entry.ID,Description)
+policy
+```
+
+```{r}
+da<-join(d,policy,by="date",type="left",match="first")
+# ggplot(data=policy,aes(x=date)) + geom_point(aes(y=Intervention.category))
+#da 
+i=1
+for (i in 1:length(da$date)){
+  if(is.na(da$Intervention.category[i]) ||da$Intervention.category[i]==0){
+    da$Intervention.category[i]<-NA
+  }else if(da$Intervention.category[i]=="Distancing"){
+    da$Intervention.category[i]<-1000.0}
+   else if(da$Intervention.category[i]=="Closures/openings"){
+    da$Intervention.category[i]<-2000.0
+  }else{
+    da$Intervention.category[i]<-NA
+  }
+}
+da$Intervention.category<-as.numeric(da$Intervention.category)
+da
+```
+
+```{r}
+ggplot(data=da[60:488],aes(x=date))+geom_point(aes(y=casesMA),col="blue") + geom_point(aes(y=Intervention.category,col="red"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Adjustment by deconvolution
+# August 2020
+# Adapted from the Swisss methodology 
+# covid-19-Re/shiny-dailyRe app/otherScripts/2_utils_getInfectionIncidence.R
+library(dplyr)
+library(tidyr)
+
+# ---- Empirical CDF to draw the reporting probability ----
+make_empirical_cdf <- function(sh, sc, numSample = 1e6) {
+  draws <- round(rgamma(numSample, shape = sh[1], scale = sc[1]) +
+                   rgamma(numSample, shape = sh[2], scale = sc[2]))
+  return(Vectorize(ecdf(draws)))
+}
+
+# ---- Sampling the waiting time distribution ----
+get_constant_waiting_time <- function(shape_incub, scale_incub, shape_event,
+                                      scale_event, length_out = 28,
+                                      n_samples = 1E6) {
+  
+  F_h <- make_empirical_cdf(sh = c(shape_incub, shape_event),
+                            sc = c(scale_incub, scale_event),
+                            numSample = n_samples)
+  
+  f <- Vectorize(function(x){
+    if(x < 0) {
+      return(0)
+    } else if(x < 0.5) {
+      return(F_h(0.5))
+    } else {
+      # Reprend le PDF
+      return(F_h(round(x + 1E-8) + 0.5) - F_h(round(x + 1E-8) - 0.5))
+    }
+  })
+  
+  x <- 0:(length_out - 1)
+  
+  # Normalizing the pdf and mean of 
+  val <- f(x) / sum(f(x))
+  
+  return(val)
+}
+
+# ---- Matrix format of the previously computed vector of waiting time ----
+get_matrix_constant_waiting_time <- function(waiting_time_distr,
+                                            all_dates) {
+  N <- length(all_dates)
+  
+  if(length(all_dates) >= length(waiting_time_distr)) {
+    waiting_time_distr <- c(waiting_time_distr, rep(0, times = N - length(waiting_time_distr)))
+  }
+  
+  delay_distribution_matrix <- matrix(0, nrow = N, ncol = N)
+  for(i in 1:N) {
+    delay_distribution_matrix[, i ] <-  c(rep(0, times = i - 1 ),
+                                          waiting_time_distr[1:(N - i + 1)])
+  }
+  
+  return(delay_distribution_matrix)
+}
+
+# ---- Main iteration of the deconvolution ----
+iterate_RL <- function(
+  initial_estimate,
+  original_incidence,
+  delay_distribution_matrix,
+  Q_matrix,
+  threshold_chi_squared = 1,
+  max_iterations = 20,
+  max_delay,
+  verbose = FALSE) {
+  
+  current_estimate <- initial_estimate
+  N <- length(current_estimate)
+  N0 <- N - max_delay
+  chi_squared <- Inf
+  count <- 1
+  
+  while(chi_squared > threshold_chi_squared & count <= max_iterations) {
+    
+    if (verbose) {
+      cat("\t\tStep: ", count, " - Chi squared: ", chi_squared, "\n")
+    }
+    
+    E <- as.vector(delay_distribution_matrix %*% current_estimate)
+    B <- tidyr::replace_na(original_incidence/E, 0)
+    
+    current_estimate <- current_estimate / Q_matrix * as.vector(crossprod(B, delay_distribution_matrix))
+    current_estimate <- tidyr::replace_na(current_estimate, 0)
+    
+    chi_squared <- 1/N0 * sum((E - original_incidence)^2/E, na.rm = T)
+    count <- count + 1
+  }
+  
+  return(current_estimate)
+}
+
+
+```
+
+
+```{r}
+# smooth(d$date, d$lambdaRM, method = "linear")
+d$lambdaSmooth <- smooth(d$lambda)
+# d$lambdaSpline <- spline(d$date,d$lambda)
+d$lambdaLoess <- getLOESSCases(d$date,d$lambda)
+ggplot(data=d,aes(x=date))+
+  geom_line(aes(y=lambda,col="lambda"))+geom_line(aes(y=lambdaSmooth,col="Smothed lambda")) +
+  geom_line(aes(y=lambdaLoess,col="lambda Loess")) +
+  ggtitle("Comparison between different smoothing methods")
+```
+
+```{r}
+#head(d)
+ggplot(data=d,aes(x=date))+geom_line(aes(y=deathsSmooth,col="LOESS"))+geom_line(aes(y=deathsMA,col="MA"))
+```
+
+
+```{r}
+# plot 
+d$smooth <- getLOESSCases(d$date,d$cases)
+d$casesSmooth <- getLOESSCases(d$date,d$cases)
+d$deathsSmooth <- getLOESSCases(d$date,d$deaths)
+#fig1<-ggplot(data=d,aes(x=date,y=smooth))+geom_point()
+d$lambda <- lambda[1:488]
+d$lambdaSmooth <- getLOESSCases(d$date,d$lambda)
+ggplot(data=d,aes(x=date))+
+  geom_line(aes(y=lambda,col="lambda"))+geom_line(aes(y=lambdaSmooth,col="Smothed lambda")) +
+  ggtitle("lambda vs. smoothed lambda")
+
+i=1
+for(i in 1:length(d$date)){
+  if(d$cases[i]==0){
+    d$cases[i]<-d$cases[i-1]
+  }
+  d$ifr[i] <-d$deathsSmooth[i]/d$casesSmooth[i]
+  i=i+1
+}
+
+
+# d$ifr <- getLOESSCases(d$date,d$ifr)
+
+i=1
+for(i in 1:length(d$date)){
+  d$trueInfection[i] <- d$lambdaSmooth[i]/(d$ifr[i])
+  i=i+1
+}
+ggplot(data=d,aes(x=date,y=ifr))+geom_point()
+ggplot(data=d,aes(x=date))+geom_line(aes(y=trueInfection,col="Smoothed Infection"))+geom_line(aes(y=cases,col="cases"))
+#spike for the green is delayed -> to adjust it i have to use deconvolution filter
+ggplot(data=d,aes(x=date)) + geom_line(aes(y=d$deathsSmooth,col="deathSmooth"))+ geom_line(aes(y=d$casesSmooth/36,col="casesSmooth"))
+#infection to confirmation delay 
+```
+
+
+
+
+
+
+
+

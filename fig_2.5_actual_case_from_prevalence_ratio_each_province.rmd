@@ -1,0 +1,206 @@
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+```
+
+
+```{r}
+ca_test <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/testing_timeseries_prov.csv")
+
+ca_cases <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/cases_timeseries_prov.csv")
+
+ca_mortality <- data.table::fread("/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/mortality_timeseries_prov.csv")
+
+
+ca_cases$date<-as.Date(ca_cases$date_report,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+ca_test$date<-as.Date(ca_test$date_testing,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+
+n=length(ca_test$province)
+for(i in 3:n){
+  if((!is.finite(ca_cases$cases[i]))&(ca_cases$province[i]==ca_cases$province[i-1])){
+   ca_cases$cases[i]<-ca_cases$cases[i-1]
+  }
+  if((ca_cases$cases[i]<1000)&(ca_cases$cases[i-1]>2000)&(ca_cases$province[i]=="Ontario")){
+   ca_cases$cases[i]<-ca_cases$cases[i-1]+(ceiling(rnorm(1,0,50)))
+  }
+  if((ca_cases$cases[i]<50)&(ca_cases$cases[i-1]>500)&(ca_cases$province[i]==ca_cases$province[i-1])){
+   ca_cases$cases[i]<-ca_cases$cases[i-1]+(ceiling(rnorm(1,0,10)))
+  }
+}
+
+for(i in 3:n){
+  if(((ca_cases$cases[i]-ca_cases$cases[i-1])>(ca_cases$cases[i-1]*1.4+500))&(ca_cases$province[i]==ca_cases$province[i-1])){
+   ca_cases$cases[i]<-(ca_cases$cases[i-1]+ca_cases$cases[i]*0.5)/2
+  }
+}
+
+ca_cases$casesMA<-rollmean(ca_cases$cases,14,fill=NA)
+ca_test$testingMA<-rollmean(ca_test$testing,14,fill=NA)
+
+for(i in 3:n){
+  if(is.finite(ca_test$testingMA[i])){
+    a<-3
+  }else{ca_test$testingMA[i]<-ca_test$testingMA[i-1]}
+}
+
+d<-join(ca_cases,ca_test,by=c("date","province"),type="left",match="first")
+myfunc <- function(df,x,y){df[df$date >= x & df$date <= y,]}
+d <- myfunc(d,as.Date("2020-03-01"),as.Date("2021-12-10"))
+
+```
+
+
+
+
+
+```{r}
+Province <- d %>% filter(province!="NWT" & province!="Repatriated"&province!="Nunavut"&province!="Yukon"&province!="Northwest Territories"&province!='Canada')
+Province$date <- as.Date(Province$date)
+
+findPositivityRate <- function(x,y){
+  res <- 0 
+  for(i in 1:length(x)){
+    res[i] <- ifelse(x[i]<y[i],x[i]/y[i],1)
+  return(res)}}
+
+myfunc <- function(df,x,y){df[df$date >= x & df$date <= y,]}
+Province <- myfunc(Province,as.Date("2020-04-01"),as.Date("2021-12-01"))  
+Province$positivity <-findPositivityRate(Province$casesMA,Province$testingMA)
+
+findDayi <- function(x){
+  res<-0
+  for(i in 1:length(x)){
+    res<-difftime(x,as.Date("2020-03-15"),units="days")
+  }
+  return(as.numeric(res))
+}
+Province$dayi<-findDayi(Province$date)
+
+for(i in 1:length(Province$dayi)){
+  Province$prevalence[i] <- (1500 / (Province$dayi[i] + 50)) * (Province$positivity[i])^(0.5) + 2
+  Province$a[i] <- 1500 / (Province$dayi[i] + 50)}
+
+Province$trueNewDailyInfections <- Province$casesMA * Province$prevalence
+
+
+Province$province[Province$province=="Quebec"]<-"Québec"
+Province$province[Province$province=="NL"]<-"Newfoundland and Labrador"
+Province$province[Province$province=="PEI"]<-"Prince Edward Island"
+Province$province[Province$province=="BC"]<-"British Columbia"
+unique(Province$province)
+```
+
+```{r}
+reported_vs_adjusted_each_province<-ggplot(data=Province,aes(date)) +
+      geom_line(aes(y = casesMA), colour = "#F8766D") + 
+      geom_line(aes(y = trueNewDailyInfections), colour = "#00C0AF") +
+  facet_wrap(~province,ncol=2,scales="free_y",shrink=T)+
+  theme(axis.text=element_text(size=6),
+        axis.title=element_text(size=6),
+        plot.margin = margin(0,0,0,0, "cm"),
+        axis.text.x = element_text(angle=45, hjust = 1),
+        legend.title =element_blank(),
+        axis.title.x=element_blank(),
+        legend.position = "none",axis.title.y=element_blank())+
+  scale_x_date(breaks = "2 months", date_labels = "%b/%y",limits =
+                 as.Date(c(date_start,date_end)))
+  
+
+reported_vs_adjusted_each_province
+
+ggsave("../LatexImages/reported_vs_adjusted_each_province.png",reported_vs_adjusted_each_province,height=6,width=6)
+knitr::plot_crop("../LatexImages/reported_vs_adjusted_each_province.png")
+```
+
+```{r}
+
+df_ci_both
+########
+window_size=7
+df_ON<-read.csv(sprintf('/Users/oliviashi/Documents/MASTER_RESEARCH/data_output/df_output_2000_ON_dlm_ws%i.csv',window_size)) %>% dplyr::select(date,y,lower,upper) 
+names(df_ON)<- c("date","I_actual_ON","I_lower_ON","I_upper_ON")
+df_QC<-read.csv(sprintf('/Users/oliviashi/Documents/MASTER_RESEARCH/data_output/df_output_2000_QC_dlm_ws%i.csv',window_size)) %>% dplyr::select(date,y,lower,upper) 
+names(df_QC)<- c("date","I_actual_QC","I_lower_QC","I_upper_QC")
+dfr_ON<-read.csv(sprintf('/Users/oliviashi/Documents/MASTER_RESEARCH/data_output/dfr_output_2000_ON_dlm_ws%i.csv',window_size)) %>% dplyr::select(date,R,lower,upper) 
+dfr_QC<-read.csv(sprintf('/Users/oliviashi/Documents/MASTER_RESEARCH/data_output/dfr_output_2000_QC_dlm_ws%i.csv',window_size)) %>% dplyr::select(date,R,lower,upper) 
+names(dfr_ON)<- c("date","R_actual_ON","R_lower_ON","R_upper_ON")
+names(dfr_QC)<- c("date","R_actual_QC","R_lower_QC","R_upper_QC")
+total_df <- merge(df_ON,df_QC,by="date")
+total_dfr <- merge(dfr_ON,dfr_QC,by="date")
+df_ci_both<-merge(total_df,total_dfr,by="date")
+df_ci_both$date<-as.Date(df_ci_both$date)-floor(window_size/2)
+df_ci_both
+
+NPI_QC<-assign_npi_type(df_ci_both=df_ci_both,jurisdiction_val="Que.")%>%dplyr::select(date,R_actual_QC,R_upper_QC,R_lower_QC,closures,openings)
+NPI_ON<-assign_npi_type(df_ci_both=df_ci_both,jurisdiction_val="Ont.")%>%dplyr::select(date,R_actual_ON,R_upper_ON,R_lower_ON,closures,openings)
+names(NPI_QC)<-c("date","R_actual_QC","R_upper_QC","R_lower_QC","closures_QC","openings_QC")
+names(NPI_ON)<-c("date","R_actual_ON","R_upper_ON","R_lower_ON","closures_ON","openings_ON")
+NPI_both<-merge(NPI_QC,NPI_ON,by="date") %>% filter(date>'2020-12-01')
+
+
+lines_open_qc <- data.frame(vlines = subset(NPI_both, !is.na(openings_QC))$date, labels = c("1", "2","3","4","5","6"), stringsAsFactors = FALSE)
+lines_closed_qc <- data.frame(vlines = subset(NPI_both, !is.na(closures_QC))$date, labels = c("a", "b","c","d","e"), stringsAsFactors = FALSE)
+
+```
+
+
+```{r}
+annotated_plot_qc_npi<-ggplot(NPI_both,aes(x=date))+
+  geom_line(aes(y=R_actual_QC),col="lightblue",cex=0.5)+
+  geom_point(data=(NPI_both %>% filter(!is.na(closures_QC))),aes(y=R_actual_QC,shape = closures_QC),na.rm=TRUE)+
+  geom_point(data=(NPI_both %>% filter(!is.na(openings_QC))),aes(y=R_actual_QC,shape = openings_QC),na.rm=TRUE)+
+  geom_ribbon(aes(ymin=R_lower_QC,ymax=R_upper_QC),col="lightblue",alpha=0.1, linetype="dashed")+
+  theme(legend.background=element_rect(fill = alpha("white", 0.5)),
+        legend.position = c(0.9, 0.8),legend.title = element_blank(),
+        legend.text = element_text(size = 10),legend.key.size=unit(0.5,"lines"),
+        legend.key = element_blank(),axis.title.x=element_blank())+
+  ylab(expression("R"[t]))+
+  scale_x_date(breaks = "1 months", date_labels = "%b/%y",limits = as.Date(c("2020-12-01","2021-06-01")))+
+  geom_vline(data = subset(NPI_both, !is.na(closures_QC)), 
+             aes(xintercept = date),
+             size = 0.2, colour = "darkgreen")+
+  geom_vline(data = subset(NPI_both, !is.na(openings_QC)), # filter data source
+             aes(xintercept = date),
+             size = 0.2, colour = "orange")+
+  geom_text(data = lines_open_qc, aes(x = vlines, y = c(rep(0.5,3),0.3,0.5,0.5), label = labels),size=4)+
+  geom_text(data = lines_closed_qc, aes(x = vlines, y = c(rep(0.3,4),0.5), label = labels),size=4)+
+  ylim(0.25,2)
+
+annotated_plot_qc_npi
+lines <- data.frame(vlines = subset(NPI_both, !is.na(openings_ON))$date, labels = c("1", "2","3"), stringsAsFactors = FALSE)
+lines_closed <- data.frame(vlines = subset(NPI_both, !is.na(closures_ON))$date, labels = c("a", "b"), stringsAsFactors = FALSE)
+lines_closed
+
+annotated_plot_on_npi<-ggplot(NPI_both,aes(x=date))+
+  geom_line(aes(y=R_actual_ON),col="pink",cex=0.5)+
+  geom_point(data=(NPI_both %>% filter(!is.na(closures_ON))),aes(y=R_actual_ON,shape = closures_ON),na.rm=TRUE)+
+  geom_point(data=(NPI_both %>% filter(!is.na(openings_ON))),aes(y=R_actual_ON,shape = openings_ON),na.rm=TRUE)+
+  geom_ribbon(aes(ymin=R_lower_ON,ymax=R_upper_ON),col="pink",alpha=0.1, linetype="dashed")+
+  theme(legend.background=element_rect(fill = alpha("white", 0.5)),
+        legend.position = c(0.9, 0.8),legend.title = element_blank(),
+        legend.text = element_text(size = 10),legend.key.size=unit(0.5,"lines"),
+        legend.key = element_blank(),axis.title.x=element_blank())+
+  ylab(expression("R"[t]))+
+  scale_x_date(breaks = "1 months", date_labels = "%b/%y",limits = as.Date(c("2020-12-01","2021-06-01")))+
+  geom_vline(data = subset(NPI_both, !is.na(closures_ON)), # filter data source
+             aes(xintercept = date),
+             size = 0.2, colour = "darkgreen")+
+  geom_vline(data = subset(NPI_both, !is.na(openings_ON)), # filter data source
+             aes(xintercept = date),
+             size = 0.2, colour = "orange")+
+  geom_text(data = lines, aes(x = vlines, y = 0.3, label = labels))+
+  geom_text(data = lines_closed, aes(x = vlines, y = 0.3, label = labels))+ylim(0.25,2)
+
+annotated_plot_npi_qc_on<-ggarrange(annotated_plot_qc_npi,annotated_plot_on_npi,nrow=2,labels=c("A","B"))
+annotated_plot_npi_qc_on
+ggsave("../LatexImages/annotated_plot_npi_qc_on.png",annotated_plot_npi_qc_on,scale=1)
+knitr::plot_crop("../LatexImages/annotated_plot_npi_qc_on.png")
+
+
+########
+
+```
+
+
+

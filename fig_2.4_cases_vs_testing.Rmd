@@ -1,0 +1,188 @@
+```{r message=FALSE, warning=FALSE}
+library(lubridate)
+library(dplyr)
+library(EpiEstim)
+library(tidyverse)
+library(zoo)
+library(ggplot2)
+library(reshape2)
+library(ggpubr)
+cases<-read.csv('/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/cases_timeseries_prov.csv')%>% dplyr::select(province,date_report,cases) %>% filter(province=='Quebec')
+names(cases)[2]<-"date"
+testing<-read.csv('/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/testing_timeseries_prov.csv')  %>% filter(province=='Quebec') %>% dplyr::select(date_testing,testing,cumulative_testing)
+names(testing)[1]<-"date"
+
+data=merge(x=cases,y=testing,by="date")
+data$date <- as.Date(data$date,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+for(i in 1:dim(data)[1]){
+  if(data$testing[i]==0){
+    data$testing[i]=data$testing[i-1]
+  }}
+data$cases[1]=10000
+for(i in 1:dim(data)[1]){
+  if(data$cases[i]<=0){
+    data$cases[i]=data$cases[i-1]
+  }}
+
+findPositivityRate <- function(x,y){
+  res <- 0
+  for(i in 1:length(x)){res[i] <- ifelse(x[i]<y[i],x[i]/y[i],1)}
+  return(res)
+}
+data$positivity <- findPositivityRate(data$cases,data$testing)
+
+data<-data %>% arrange(date)
+data$cases<-rollmean(data$cases,14,align="left",fill=1000)
+data$testing<-rollmean(data$testing,14,align="left",fill=10000)
+data$cases<-rollmean(data$cases,2,align="left",fill=1000)
+data$testing<-rollmean(data$testing,7,align="left",fill=10000)
+
+findDayi <- function(x){
+  res<-0
+  for(i in 1:length(x)){res<-difftime(x,as.Date("2020-03-15"),units="days")}
+  return(as.numeric(res))
+}
+data$dayi<-findDayi(data$date)
+
+for(i in 1:length(data$dayi)){
+  data$prevalence[i] <- (1500 / (data$dayi[i] + 50)) * (data$positivity[i])^(0.5) + 2
+  data$a[i] <- 1500 / (data$dayi[i] + 50)}
+
+data$trueNewDailyInfections <- data$cases * data$prevalence
+for(i in 2:dim(data)[1]){
+  if(is.nan(data$trueNewDailyInfections[i])|data$trueNewDailyInfections[i]==0.0000){
+    data$trueNewDailyInfections[i]=data$trueNewDailyInfections[i-1]}}
+for(i in 10:dim(data)[1]){
+  if(data$trueNewDailyInfections[i]>data$trueNewDailyInfections[i-1]+data$trueNewDailyInfections[i-2]+data$trueNewDailyInfections[i-3]*0.5){
+    data$trueNewDailyInfections[i]=data$trueNewDailyInfections[i-1]*1.4
+    data$trueNewDailyInfections[i-1]=data$trueNewDailyInfections[i-2]*1.4
+    data$trueNewDailyInfections[i-2]=data$trueNewDailyInfections[i-3]*1.4}
+}
+```
+
+
+fig 2.2
+```{r}
+data<-data%>% filter(date<'2021-12-01')%>% filter(date>'2020-04-01')
+fig1<-ggplot(data=data,aes(date)) +
+  geom_line(aes(y = cases, colour = "Reported cases")) + 
+  geom_line(aes(y = trueNewDailyInfections, colour = "Actual cases"))+
+  scale_x_date(breaks = "2 months", date_labels = "%b/%y")+
+theme(legend.background=element_rect(fill = alpha("white", 0.5)),legend.title = element_blank(),legend.position = c(0.85, 0.8),legend.text = element_text(size = 10),legend.key.size=unit(0.5,"lines"),legend.key = element_blank(),axis.title.x=element_blank())
+  
+plt3<-ggplot(data=data,aes(x=date))+
+  geom_line(aes(y=cases,col="Reported cases"))+
+  geom_line(aes(y=testing,col="Total tests"))+
+  ylim(0,20000)+
+  scale_x_date(breaks = "2 months", date_labels = "%b/%y")+
+theme(legend.background=element_rect(fill = alpha("white", 0.5)),legend.title = element_blank(),legend.position = c(0.85, 0.8),legend.text = element_text(size = 10),legend.key.size=unit(0.5,"lines"),legend.key = element_blank(),axis.title.x=element_blank())
+#ggtitle("Reported cases vs. total tests")+
+
+actual_vs_reported<-ggarrange(plt3, fig1, nrow = 2,labels = c("A","B")) 
+actual_vs_reported
+ggsave("../LatexImages/actual_vs_reported.png",actual_vs_reported,scale=1)
+knitr::plot_crop("../LatexImages/actual_vs_reported.png")
+```
+
+
+g<-ggplot(data=df_figure,aes(x=date)) + geom_line(aes(y=casesSmooth,col="Reported cases"))+  geom_line(aes(y=casesPRr,col="Infections (Prevalence Ratio)"))+ geom_line(aes(y=casesRC,col="Infections (Richard-Lucy)"))+
+  ggtitle("Comparisons of True New Daily Infections from two different methods")+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y")+ theme(legend.position = c(0.85, 0.8),legend.title = element_text(size = 7),legend.text = element_text(size = 7),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())
+ggarrange(g,g,nrow=2)
+
+
+
+
+
+
+```{r}
+# plt1<-ggplot(data=data,aes(x=dayi,a)) + geom_point()+
+#       ggtitle("Effect on day_i on exponential constant a in Quebec")+
+#   scale_x_date(breaks = "2 months", date_labels = "%b %y")+
+#   theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = 
+# 	element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())
+
+# plt2<-ggplot(data=data,aes(x=positivity,y=prevalence))+geom_point()+
+#       ggtitle("Relationship between test positivity and prevalence ratio in Quebec")
+
+# plt3<-ggplot(data=data,aes(x=positivity,y=prevalence))+geom_point()+ggtitle("Relationship between test positivity and prevalence ratio in Quebec")
+
+```
+
+
+```{r}
+plt3<-ggplot(data=data,aes(date)) +
+      geom_line(aes(y = cases, colour = "Reported Infections")) + 
+      geom_line(aes(y = trueNewDailyInfections, colour = "Adjusted Infections")) +
+      geom_line(aes(y = testing, colour = "Total Tests ")) +
+      ggtitle(sprintf("Reported vs. adjusted cases in Quebec"))
+plt3
+```
+
+
+
+
+
+
+```{r}
+
+
+plt2 <- ggplot(data=data,aes(x=date,y=positivity)) + geom_point() #+ ggtitle("positivity rate in ",Quebec$prname[1])
+
+plt3<-ggplot(data=qc,aes(x=positivity,y=prevalence))+geom_point()
+
+
+ggarrange(plt1, plt2, labels = c("A","B"), ncol = 1, nrow = 2) 
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

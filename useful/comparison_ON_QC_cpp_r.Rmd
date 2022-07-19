@@ -1,0 +1,705 @@
+```{r message=FALSE, warning=FALSE}
+library(lubridate)
+library(plyr)
+library(dplyr)
+library(EpiEstim)
+library(tidyverse)
+library(zoo)
+library(ggplot2)
+library(reshape2)
+library(ggpubr)
+library(readxl)
+library(MASS)
+
+#Data initialization
+data<-read.csv('/Users/oliviashi/Documents/MASTER_RESEARCH/Covid19Canada/timeseries_prov/cases_timeseries_prov.csv') 
+data$date <- as.Date(data$date_report,format="%d-%m-%Y", tryFormats= "%Y-%m-%d") 
+data<-data %>% arrange(date)
+
+# data$cases[1]=1
+# for(i in 2:dim(data)[1]){
+#   if(data$cases[i]<=0){
+#     data$cases[i]=data$cases[i-1]}}
+# data = data %>% mutate(cases_smoothed = floor(rollmean(cases, k = 5, fill = NA, align = "left"))) 
+data<-data%>%filter('2020-08-01'<date)%>% filter( date<'2021-12-01')
+
+data_ON<-data %>% dplyr::select(date,province,cases)%>%dplyr::filter(province=='Ontario')
+data_QC<-data %>% dplyr::select(date,province,cases)%>%dplyr::filter(province=='Quebec')
+
+```
+
+
+Initialize functions and find the parameters for the first fit (find Poisson case and Huber loss)
+```{r message=FALSE, warning=FALSE}
+list_simulated_I_ON<-list()
+list_simulated_I_QC<-list()
+listallR_ON<-list()
+listallR_QC<-list()
+list_mean_w_ON<-list()
+list_mean_w_QC<-list()
+list_std_w_ON<-list()
+list_std_w_QC<-list()
+list_w_ON<-list()
+list_w_QC<-list()
+
+
+huber_loss<-function(par,case,rmean,rstd,delv){
+ 	mean_w<-par[1]
+ 	std_w<-par[2]
+	if(min(par)<=1){return(sum(case^2)*2+1e5)}
+	das<-pmax(0,find_poisson_case(case,mean_w,std_w,rmean,rstd))
+	res<-(abs(das-case)<=delv)*0.5*(das-case)^2+
+	     (abs(das-case)>delv)*delv*(abs(das-case)-0.5*delv)
+	return(sum(res))}
+	
+list_simulated_I_ON[1]<-list(data_ON$cases)
+list_simulated_I_QC[1]<-list(data_QC$cases)
+
+find_poisson_case<-function(case,mean_w,std_w,rmean,rstd){
+  res_i <- estimate_R(case, method = "parametric_si",
+  config = make_config(list(mean_si = mean_w,std_si = std_w, mean_prior = rmean, std_prior = rstd)))
+  R_val<-res_i$R$`Mean(R)`
+  firstNonNA <- min(which(!is.na(R_val)))
+  for(i in 1:firstNonNA){R_val[i]<-R_val[firstNonNA]-i*0.1}
+  n=length(case)
+  I=c(case[1:14],seq(1,(n-14),1))
+  w<-res_i$si_distr
+  Rvec<-unlist(R_val)
+  for (t in 14:n) {
+    svec=c(1:t)
+    poisson_mean=Rvec[t]*sum(I[t-svec]*w[svec])
+    I[t]=poisson_mean
+    if(is.na(I[t])){I[t]=I[t-1]}}
+  return(I)}
+
+
+#The first fit
+prior.m<-11
+prior.s<-1.1
+prior.m_ON<-11
+prior.s_ON<-1.1
+prior.m_QC<-3.0
+prior.s_QC<-4.6
+del.v<-1.5
+del.v_ON=1.3
+opo_ON<-optim(par=c(9,1),huber_loss,case=data_ON$cases,rmean=prior.m,rstd=prior.s,delv=del.v_ON,method="BFGS", control = list(maxit=500))
+opo_QC<-optim(par=c(10,4.1),huber_loss,case=data_QC$cases,rmean=prior.m_QC,rstd=prior.s_QC,delv=del.v,method="BFGS", control = list(maxit=500))
+baseline_ON<-list(find_poisson_case(case=data_ON$cases,mean_w=opo_ON$par[1],std_w=opo_ON$par[2],rmean=prior.m_ON,rstd=prior.s_ON))
+baseline_QC<-list(find_poisson_case(case=data_QC$cases,mean_w=opo_QC$par[1],std_w=opo_QC$par[2],rmean=prior.m_QC,rstd=prior.s_QC))
+
+list_mean_w_ON[1]=opo_ON$par[1]
+list_mean_w_QC[1]=opo_QC$par[1]
+list_std_w_ON[1]=opo_ON$par[2]
+list_std_w_QC[1]=opo_QC$par[2]
+
+#get w for simulate forward
+incid_sim_ON=data_ON$cases 
+incid_sim_QC=data_QC$cases 
+
+res_1_ON <- estimate_R(incid_sim_ON, method = "parametric_si",
+          config = make_config(list(mean_si = list_mean_w_ON[[1]],std_si = list_std_w_ON[[1]], mean_prior = prior.m,std_prior = prior.s)))
+first_R_ON<-res_1_ON$R$`Mean(R)`
+firstNonNA_ON <- min(which(!is.na(first_R_ON)))
+for(i in 1:firstNonNA_ON){first_R_ON[i]<-first_R_ON[firstNonNA_ON]}
+listallR_ON[1]<-list(first_R_ON)
+list_w_ON[1]<-list(res_1_ON$si_distr)
+
+res_1_QC <- estimate_R(incid_sim_QC, method = "parametric_si",
+          config = make_config(list(mean_si = list_mean_w_QC[[1]],std_si = list_std_w_QC[[1]], mean_prior = prior.m_QC,std_prior = prior.s_QC)))
+first_R_QC<-res_1_QC$R$`Mean(R)`
+firstNonNA_QC <- min(which(!is.na(first_R_QC)))
+for(i in 1:firstNonNA_QC){first_R_QC[i]<-first_R_QC[firstNonNA_QC]}
+listallR_QC[1]<-list(first_R_QC)
+list_w_QC[1]<-list(res_1_QC$si_distr)
+```
+
+
+Initiate functions to use
+```{r message=FALSE, warning=FALSE}
+simulate_forward<-function(w,first_fit,r){
+  n=length(w)
+  I=c(first_fit[[1]][1:14],seq(1,(n-14),1))
+  Rvec<-unlist(r)
+  for (t in 14:n) {
+    svec=c(1:t)
+    poisson_mean=Rvec[t]*sum(I[t-svec]*w[svec])
+    I[t]=rpois(1, lambda=poisson_mean) 
+    if(is.na(I[t])){I[t]=I[t-1]}}
+  return(I)}
+```
+
+
+
+together iterations 
+```{r message=FALSE, warning=FALSE}
+num=5
+print(Sys.time())
+
+for(i in 2:num){
+  print(paste("running iterations ",i))
+  list_simulated_I_ON[i]<-list(simulate_forward(w=list_w_ON[[1]],first_fit=baseline_ON,r=listallR_ON[1]))
+  list_simulated_I_QC[i]<-list(simulate_forward(w=list_w_QC[[1]],first_fit=baseline_QC,r=listallR_QC[1]))
+  incid_sim_ON=list_simulated_I_ON[i][[1]]
+  incid_sim_QC=list_simulated_I_QC[i][[1]]
+  
+  xstart_ON<-c(list_mean_w_ON[[1]]+(runif(1)-0.5)*0.02,list_std_w_ON[[1]]*0.05)
+  op_ON<-optim(par=xstart_ON,huber_loss,case=incid_sim_ON,rmean=prior.m,rstd=prior.s,delv=(del.v_ON),method="BFGS", control =list(maxit=500))[1][[1]]
+  list_mean_w_ON[i]<-op_ON[1]
+  list_std_w_ON[i]<-op_ON[2]
+  res_i_ON <- estimate_R(incid_sim_ON, method = "parametric_si", config = make_config(list(mean_si = op_ON[1],std_si =op_ON[2],mean_prior=prior.m_ON,std_prior=prior.s_ON)))
+  ith_R_ON<-res_i_ON$R$`Mean(R)`
+  firstNonNA <- min(which(!is.na(ith_R_ON)))
+  for(k in 1:firstNonNA){ith_R_ON[k]<-ith_R_ON[firstNonNA]}
+  listallR_ON[i]<-list(ith_R_ON)
+  list_w_ON[i]<-list(res_i_ON$si_distr)
+  
+  xstart_QC<-c(list_mean_w_QC[[1]]+(runif(1)-0.5)*2,list_std_w_QC[[1]]+(runif(1)-0.1))#2,0.1
+  op_QC<-optim(par=xstart_QC,huber_loss,case=incid_sim_QC,rmean=prior.m_QC+(runif(1)-0.5)*2,rstd=prior.s_QC+(runif(1)-0.5)*0.1,delv=del.v,method="BFGS", control =list(maxit=200))[1][[1]]
+  list_mean_w_QC[i]<-op_QC[1]
+  list_std_w_QC[i]<-op_QC[2]
+  res_i_QC <- estimate_R(incid_sim_QC, method = "parametric_si", config = make_config(list(mean_si = op_QC[1],std_si =op_QC[2],mean_prior=prior.m_QC,std_prior=prior.s_QC)))
+  ith_R<-res_i_QC$R$`Mean(R)`
+  firstNonNA <- min(which(!is.na(ith_R))) 
+  for(k in 1:firstNonNA){ith_R[k]<-ith_R[firstNonNA]}
+  listallR_QC[i]<-list(ith_R)
+  list_w_QC[i]<-list(res_i_QC$si_distr)
+}
+```
+
+
+separate iterations QC
+```{r message=FALSE, warning=FALSE}
+#QC
+num=50
+print(Sys.time())
+for(i in 2:num){
+  print(paste("running iterations ",i))
+  list_simulated_I_QC[i]<-list(simulate_forward(w=list_w_QC[[1]],first_fit=baseline_QC,r=listallR_QC))
+  incid_sim=list_simulated_I_QC[i][[1]]
+  xstart<-c(list_mean_w_QC[[1]]+(runif(1)-0.5)*4,list_std_w_QC[[1]]+(runif(1)-0.5)*0.2) #2,0.1
+  op<-optim(par=xstart,huber_loss,case=incid_sim,rmean=prior.m_QC,rstd=prior.s_QC,delv=(del.v-0.2),method="SANN", control =list(maxit=500))[1][[1]]#penalize outliers less
+  list_mean_w_QC[i]<-op[1]
+  list_std_w_QC[i]<-op[2]
+  #get CI for R
+  res_i <- estimate_R(incid_sim, method = "parametric_si", config = make_config(list(mean_si = op[1],std_si =op[2],mean_prior=prior.m,std_prior=prior.s)))
+  ith_R<-res_i$R$`Mean(R)`
+  firstNonNA <- min(which(!is.na(ith_R)))#  NonNAindex 
+  for(k in 1:firstNonNA){ith_R[k]<-ith_R[firstNonNA]}
+  listallR_QC[i]<-list(ith_R)
+  list_w_QC[i]<-list(res_i$si_distr)
+} 
+```
+
+
+separate iterations ON
+```{r message=FALSE, warning=FALSE}
+print(Sys.time())
+num=10
+for(i in 2:num){
+  print(paste("running iterations ",i))
+  #new simulated data 
+  list_simulated_I_ON[i]<-list(simulate_forward(w=list_w_ON[[1]],first_fit=baseline_ON,r=listallR_ON))
+  incid_sim=list_simulated_I_ON[i][[1]]
+  #each student is fitting their own data
+  xstart<-c(list_mean_w_ON[[1]]+(runif(1)-0.5)*1,list_std_w_ON[[1]]+(runif(1)-0.5)*0.05) #2,0.1
+  op<-optim(par=xstart,huber_loss,case=incid_sim,rmean=prior.m,rstd=prior.s,delv=(del.v-0.2),method="BFGS", control =list(maxit=500))[1][[1]]#penalize outliers less
+  list_mean_w_ON[i]<-op[1]
+  list_std_w_QC[i]<-op[2]
+  #get CI for R
+  res_i <- estimate_R(incid_sim, method = "parametric_si", config = make_config(list(mean_si = op[1],std_si =op[2],mean_prior=prior.m,std_prior=prior.s)))
+  ith_R<-res_i$R$`Mean(R)`
+  firstNonNA <- min(which(!is.na(ith_R)))#  NonNAindex 
+  for(k in 1:firstNonNA){ith_R[k]<-ith_R[firstNonNA]}
+  listallR_ON[i]<-list(ith_R)
+  list_w_ON[i]<-list(res_i$si_distr)
+}
+```
+
+
+
+df_ci_both initiation
+```{r message=FALSE, warning=FALSE}
+n=length(baseline_ON[[1]])-7
+df_ci_both<-data.frame(date=data_ON$date[1:n],
+                       I_actual_ON=seq(1,n,1),
+                       cases_pc_ON=seq(1,n,1),
+                       cases_pc_QC=seq(1,n,1),
+                       baseline_ON=baseline_ON[[1]][1:n],
+                       baseline_QC=baseline_QC[[1]][1:n],
+                       I_actual_QC=seq(1,n,1),
+                       R_actual_ON=seq(1,n,1),
+                       R_actual_QC=seq(1,n,1),
+                       I_lower_ON=seq(1,n,1),
+                       I_upper_ON=seq(1,n,1),
+                       I_lower_QC=seq(1,n,1),
+                       I_upper_QC=seq(1,n,1),
+                       R_lower_ON=seq(1,n,1),
+                       R_lower_QC=seq(1,n,1),
+                       R_upper_ON=seq(1,n,1),
+                       R_upper_QC=seq(1,n,1))
+for(i in 1:n){
+  new_ON<-list()
+  newr_ON<-list()
+  new_QC<-list()
+  newr_QC<-list()
+  df_ci_both$R_actual_ON[i]=listallR_ON[[1]][i]
+  df_ci_both$I_actual_ON[i]=data_ON$cases[i]
+  df_ci_both$R_actual_QC[i]=listallR_QC[[1]][i]
+  df_ci_both$I_actual_QC[i]=data_QC$cases[i]
+  for(j in 2:num){
+    new_ON[j]=(list_simulated_I_ON[[j]][[i]])
+    newr_ON[j]=(listallR_ON[[j]][[i]])
+    new_QC[j]=(list_simulated_I_QC[[j]][[i]])
+    newr_QC[j]=(listallR_QC[[j]][[i]])
+  }
+  if(i<n-5){
+    df_ci_both$R_lower_ON[i+5]=quantile(unlist(newr_ON),prob=c(0.025,0.975))[[1]]
+    df_ci_both$R_upper_ON[i+5]=quantile(unlist(newr_ON),prob=c(0.025,0.975))[[2]]
+    df_ci_both$I_lower_ON[i+5]=quantile(unlist(new_ON),prob=c(0.025,0.975))[[1]]
+    df_ci_both$I_upper_ON[i+5]=quantile(unlist(new_ON),prob=c(0.025,0.975))[[2]]
+    df_ci_both$R_lower_QC[i+5]=quantile(unlist(newr_QC),prob=c(0.05,0.95))[[1]]
+    df_ci_both$R_upper_QC[i+5]=quantile(unlist(newr_QC),prob=c(0.05,0.95))[[2]]
+    df_ci_both$I_lower_QC[i+5]=quantile(unlist(new_QC),prob=c(0.025,0.975))[[1]]
+    df_ci_both$I_upper_QC[i+5]=quantile(unlist(new_QC),prob=c(0.025,0.975))[[2]]
+  }
+}
+```
+
+df_ci_both initiation for cpp only
+```{r}
+n=length(data_ON$date)-7
+df_ci_both<-data.frame(date=data_ON$date[1:n],
+                       I_actual_ON=data_ON$cases[1:n],
+                       I_actual_QC=data_QC$cases[1:n],
+                       cases_pc_ON=seq(1,n,1),
+                       cases_pc_QC=seq(1,n,1))
+```
+
+fig3.1: compare ON and QC for cases with CI 
+```{r}
+ggplot(df_ci_both,aes(x=date))+
+  geom_point(aes(y=I_actual_QC,col="QC"),cex=0.5)+
+  geom_point(aes(y=I_actual_ON,col="ON"),cex=0.5)+
+  geom_ribbon(aes(ymin=I_lower_QC,ymax=I_upper_QC),col="lightblue",alpha=0.1, linetype="dashed")+
+  geom_ribbon(aes(ymin=I_lower_ON,ymax=I_upper_ON),col="lightpink1",alpha=0.1, linetype="dashed")+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01")))+
+  scale_color_manual(values = c("ON"="red","QC"="blue")) +  
+  theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 10),legend.text = element_text(size = 10),legend.key.size=unit(0.5,"lines"),legend.key = element_blank()) +
+  ylim(0,6000)+ylab("cases")+labs(color="Province")+
+  ggtitle("Comparison of reported cases with confidence interval")
+```
+
+
+df_ci_both cpp both and separate 
+fig 1.1: Comparison of cases per capita
+fig 1.2: cases per capita per province 
+```{r message=FALSE, warning=FALSE}
+population_ON=14789778
+population_QC=8604500
+df_ci_both$cases_pc_ON<-(df_ci_both$I_actual_ON*100000/population_ON)[1:n]
+df_ci_both$cases_pc_QC<-(df_ci_both$I_actual_QC*100000/population_QC)[1:n]
+
+#graph 1.1
+f11<-ggplot(data=df_ci_both,aes(x=date),cex=0.5)+
+  geom_point(aes(y=cases_pc_ON,color="ON"),cex=0.1)+
+  geom_point(aes(y=cases_pc_QC,color="QC"),cex=0.1)+
+  labs(y="cases per capita", color="Province")+
+  scale_color_manual(values = c("ON"="red","QC"="blue"))+ 
+  theme(legend.position = c(0.9, 0.8),legend.title = element_text(size = 10),legend.text = element_text(size = 10),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01")))+
+  ggtitle("Comparison of reported cases per capita")+ylim(0,50)
+
+ggarrange(f11,f11,nrow=2)
+
+```
+
+
+
+
+fig 2.1: comparison of Rt with confidence interval in one graph
+fig 2.2: Rt with Confidence Interval for QC; Rt with Confidence Interval for ON
+```{r}
+fig_R_both<-ggplot(df_ci_both,aes(date))+
+  geom_point(aes(y=R_actual_ON,color="ON"),cex=0.5)+
+  geom_point(aes(y=R_actual_QC,color="QC"),cex=0.5)+
+  geom_ribbon(aes(ymin=R_lower_QC,ymax=R_upper_QC),alpha=0.1, linetype="dashed",color="lightblue")+
+  geom_ribbon(aes(ymin=R_lower_ON,ymax=R_upper_ON),alpha=0.1, linetype="dashed",color="lightpink1")+
+  scale_color_manual(values = c("ON"="red","QC"="blue"))+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01")))+
+  theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())+
+  ylim(0.3,3)+ labs(color="Province")+ 
+  ggtitle(sprintf("Comparison of Rt with %d iterations",num))+
+  ylab(expression("R"[t]))
+
+fig_R_QC<-ggplot(df_ci_both,aes(x=date))+
+  geom_point(aes(y=R_actual_QC),col="blue",cex=0.5)  + 
+  geom_ribbon(aes(ymin=R_lower_QC,ymax=R_upper_QC),alpha=0.1, linetype="dashed",color="lightblue")+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01"))) +
+  ggtitle("Rt with Confidence Interval for QC")+ylim(0.2,3)+ylab("Rt")
+
+fig_R_ON<-ggplot(df_ci_both,aes(x=date))+ 
+  geom_point(aes(y=R_actual_ON),col="red",cex=0.5)  +
+  geom_ribbon(aes(ymin=R_lower_ON,ymax=R_upper_ON),col="lightpink1",alpha=0.1, linetype="dashed")+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01"))) +
+  ggtitle("Rt with Confidence Interval for ON")+ylim(0.2,3)+ylab("Rt")
+
+
+fig_R_both
+ggarrange(fig_R_ON,fig_R_QC,nrow=2)
+```
+
+fig 4,5:
+```{r}
+# plot(x=unlist(list_std_w_QC),y=unlist(list_mean_w_QC))
+```
+
+```{r}
+unique(NPI_QC$Distancing)
+unique(NPI_QC$`Closures/openings`)
+```
+
+
+
+NPI only QC
+```{r}
+s3 <- read_excel("/Users/oliviashi/Library/Containers/com.microsoft.Excel/Data/Downloads/aoda-covid-19-intervention-timeline-in-canada-en.xlsx",sheet=3,col_names=TRUE,skip=2)
+s3$date <- as.Date(s3$`Start date`,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+s3$cat <- s3$`Intervention Category`
+s3 <- s3 %>% dplyr::select("Entry ID","date","cat","Action","Jurisdiction","Description") %>% filter(Jurisdiction=="Que.")
+s3 <- tibble(s3)
+da <- join(df_ci_both,s3,by="date",type="left",match="first")
+
+NPI_QC <- da %>% dplyr::select(date,I_actual_QC,cat,Action,Description,R_actual_QC)
+NPI_QC <- pivot_wider(data=NPI_QC,names_from=cat,values_from=Description) %>% dplyr::select(date,Action,I_actual_QC,R_actual_QC,`Closures/openings`,Distancing)
+NPI_QC$type<-NA
+
+for(i in 1:length(NPI_QC$date)){
+  if(is.na(NPI_QC$`Closures/openings`[i])){
+    NPI_QC$`Closures/openings`[i]<-NA
+  }else if(grepl('school',NPI_QC$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) &&
+           NPI_QC$Action[i]=="New"){
+    NPI_QC$type[i]<-"school closed"
+  }else if(grepl('school',NPI_QC$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) &&
+           NPI_QC$Action[i]=="Eased"){
+    NPI_QC$type[i]<-"school opened"
+  }else if((grepl('non-essential',NPI_QC$`Closures/openings`[i], ignore.case = TRUE) ||
+            grepl('restaurant',NPI_QC$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('bar',NPI_QC$`Closures/openings`[i], ignore.case = TRUE)) &&
+           NPI_QC$Action[i]=="New"){
+    NPI_QC$type[i]<-"non-essential business opened"
+  }else if((grepl('non-essential',NPI_QC$`Closures/openings`[i], ignore.case = TRUE) ||
+            grepl('restaurant',NPI_QC$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('bar',NPI_QC$`Closures/openings`[i], ignore.case = TRUE)) &&
+           NPI_QC$Action[i]=="Eased"){
+    NPI_QC$type[i]<-"non-essential business opened"
+  }else if((grepl('public places',NPI_QC$`Closures/openings`[i], ignore.case = TRUE) ||
+            grepl('parks',NPI_QC$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('museums',NPI_QC$`Closures/openings`[i], ignore.case = TRUE)) &&
+           NPI_QC$Action[i]=="New"){
+    NPI_QC$type[i]<-"public places closed"
+  }else if((grepl('public places',NPI_QC$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('parks',NPI_QC$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('museums',NPI_QC$`Closures/openings`[i], ignore.case = TRUE,fixed=FALSE)||
+            grepl('worship',NPI_QC$`Closures/openings`[i], ignore.case = TRUE)) && NPI_QC$Action[i]=="Eased"){
+    NPI_QC$type[i]<-"public places opened"
+  }
+}
+
+for(i in 1:length(NPI_QC$date)){
+  if(is.na(NPI_QC$Distancing[i])){
+    NPI_QC$Distancing[i]<-NA
+  }else if(grepl('curfew',NPI_QC$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    NPI_QC$type[i]<-"curfew imposed"
+  }else if(grepl('curfew',NPI_QC$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    NPI_QC$type[i]<-"curfew eased"
+  }else if(grepl('gathering',NPI_QC$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    NPI_QC$type[i]<-"gathering restricted"
+  }else if(grepl('gathering',NPI_QC$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    NPI_QC$type[i]<-"gathering permitted"
+  }else if(grepl('worship',NPI_QC$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    NPI_QC$type[i]<-"public places closed"
+  }else if(grepl('worship',NPI_QC$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    NPI_QC$type[i]<-"public places opened"
+  }else if(grepl('bar',NPI_QC$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    NPI_QC$type[i]<-"non-essential business closed"
+  }else if(grepl('bar',NPI_QC$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    NPI_QC$type[i]<-"non-essential business opened"
+  }
+}
+NPI_QC
+
+ggplot(NPI_QC,aes(x=date))+geom_point(aes(y=R_actual_QC))+
+  geom_point(aes(y=R_actual_QC,colour = type),na.translate=FALSE)+
+  scale_fill_discrete(na.translate=FALSE)+ylim(0,3)+
+  theme(legend.position = c(0.9, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())
+```
+
+NPI only ON
+```{r}
+s3 <- read_excel("/Users/oliviashi/Library/Containers/com.microsoft.Excel/Data/Downloads/aoda-covid-19-intervention-timeline-in-canada-en.xlsx",sheet=3,col_names=TRUE,skip=2)
+s3$date <- as.Date(s3$`Start date`,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+s3$cat <- s3$`Intervention Category`
+s3 <- s3 %>% dplyr::select("Entry ID","date","cat","Action","Jurisdiction","Description") %>% filter(Jurisdiction=="Ont.")
+s3 <- tibble(s3)
+da <- join(df_ci_both,s3,by="date",type="left",match="first")
+
+NPI_ON <- da %>% dplyr::select(date,I_actual_ON,cat,Action,Description,R_actual_ON)
+NPI_ON <- pivot_wider(data=NPI_ON,names_from=cat,values_from=Description) %>% dplyr::select(date,Action,I_actual_ON,R_actual_ON,`Closures/openings`,Distancing)
+NPI_ON$type<-NA
+
+for(i in 1:length(NPI_ON$date)){
+  if(is.na(NPI_ON$`Closures/openings`[i])){
+    NPI_ON$`Closures/openings`[i]<-NA
+  }else if(grepl('school',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) &&
+           NPI_ON$Action[i]=="New"){
+    NPI_ON$type[i]<-"school closed"
+  }else if(grepl('school',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) &&
+           NPI_ON$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"school opened"
+  }else if((grepl('non-essential',NPI_ON$`Closures/openings`[i], ignore.case = TRUE) ||
+            grepl('restaurant',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('bar',NPI_ON$`Closures/openings`[i], ignore.case = TRUE)) &&
+           NPI_ON$Action[i]=="New"){
+    NPI_ON$type[i]<-"non-essential business opened"
+  }else if((grepl('non-essential',NPI_ON$`Closures/openings`[i], ignore.case = TRUE) ||
+            grepl('restaurant',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('bar',NPI_ON$`Closures/openings`[i], ignore.case = TRUE)) &&
+           NPI_ON$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"non-essential business opened"
+  }else if((grepl('public places',NPI_ON$`Closures/openings`[i], ignore.case = TRUE) ||
+            grepl('parks',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('museums',NPI_ON$`Closures/openings`[i], ignore.case = TRUE)) &&
+           NPI_ON$Action[i]=="New"){
+    NPI_ON$type[i]<-"public places closed"
+  }else if((grepl('public places',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('parks',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('museums',NPI_ON$`Closures/openings`[i], ignore.case = TRUE,fixed=FALSE)||
+            grepl('worship',NPI_ON$`Closures/openings`[i], ignore.case = TRUE)) && NPI_ON$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"public places opened"
+  }
+}
+
+for(i in 1:length(NPI_ON$date)){
+  if(is.na(NPI_ON$Distancing[i])){
+    NPI_ON$Distancing[i]<-NA
+  }else if(grepl('gathering',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    NPI_ON$type[i]<-"gathering restricted"
+  }else if(grepl('gathering',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"gathering permitted"
+  }else if(grepl('worship',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    NPI_ON$type[i]<-"public places closed"
+  }else if(grepl('worship',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"public places opened"
+  }else if(grepl('bar',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    NPI_ON$type[i]<-"non-essential business closed"
+  }else if(grepl('bar',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"non-essential business opened"
+  }
+}
+NPI_ON
+
+ggplot(NPI_ON,aes(x=date))+geom_point(aes(y=R_actual_ON))+
+  geom_point(aes(y=R_actual_ON,colour = type),na.translate=FALSE)+
+  scale_fill_discrete(na.translate=FALSE)+ylim(0,3)+
+  theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())
+```
+
+
+--------------------------------------------------------------------------------------------------
+other stuff
+
+fig 4,5
+```{r}
+fig1<-ggplot(df_ci_both,aes(x=date))+
+  geom_point(aes(y=I_actual_QC),cex=0.5) +ylab("cases")+
+  geom_line(aes(y=I_lower_QC,col="lower"))+
+  geom_line(aes(y=I_upper_QC,col="upper")) +
+  ggtitle(sprintf("Confidence Intervaln for cases with %d iterations for QC",num)) + 
+  labs(colour="Confidence Interval")+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01"))) +
+  theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())
+
+fig2<-ggplot(df_ci_both,aes(date))+ geom_point(aes(y=R_actual_QC),cex=0.5) +
+  ylab(expression("R"[t]))+
+  geom_line(aes(y=R_lower_QC,col="lower"))+
+  geom_line(aes(y=R_upper_QC,col="upper"))+ylim(0,3)+
+  labs(colour="Confidence Interval") +ggtitle(sprintf("Confidence Interval for Rt with %d iterations for QC",num)) +
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01"))) +
+  theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())
+
+#Only ON
+fig3<-ggplot(df_ci_both,aes(x=date))+
+  geom_point(aes(y=I_actual_ON),cex=0.5) +ylab("cases")+
+  geom_line(aes(y=I_lower_ON,col="lower"))+
+  geom_line(aes(y=I_upper_ON,col="upper")) +
+  ggtitle(sprintf("Confidence Intervaln for cases with %d iterations for ON",num)) + 
+  labs(colour="Confidence Interval")+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01"))) +
+  theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())
+
+fig4<-ggplot(df_ci_both,aes(date))+ geom_point(aes(y=R_actual_ON),cex=0.5) +
+  ylab(expression("R"[t]))+
+  geom_line(aes(y=R_lower_ON,col="lower"))+
+  geom_line(aes(y=R_upper_ON,col="upper"))+ylim(0,3)+
+  labs(colour="Confidence Interval") +ggtitle(sprintf("Confidence Interval for Rt with %d iterations for ON",num)) +
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01"))) +
+  theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())
+
+ggarrange(fig1,fig2,nrow=2)
+ggarrange(fig3,fig4,nrow=2)
+```
+
+
+
+
+
+NPI QC
+```{r}
+s3 <- read_excel("/Users/oliviashi/Library/Containers/com.microsoft.Excel/Data/Downloads/aoda-covid-19-intervention-timeline-in-canada-en.xlsx",sheet=3,col_names=TRUE,skip=2)
+s3$date <- as.Date(s3$`Start date`,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+s3$cat <- s3$`Intervention Category`
+s3 <- s3 %>% dplyr::select("Entry ID","date","cat","Action","Jurisdiction","Description") %>% filter(Jurisdiction=="Que.")
+s3 <- tibble(s3)
+da <- join(df_ci_both,s3,by="date",type="left",match="first")
+
+NPI_QC <- da %>% dplyr::select(date,I_actual_QC,cat,Action,Description,R_actual_QC)
+NPI_QC <- pivot_wider(data=NPI_QC,names_from=cat,values_from=Description) %>% dplyr::select(date,Action,I_actual_QC,R_actual_QC,`Closures/openings`,Distancing)
+NPI_QC$type<-NA
+
+
+for(i in 1:length(NPI_QC$date)){
+  if(is.na(NPI_QC$Distancing[i])){
+  }else if(grepl('curfew',NPI_QC$Distancing[i], ignore.case = TRUE) && NPI_QC$Action[i]=="New"){
+    NPI_QC$type[i]<-"curfew imposed"
+  }else if(grepl('curfew',NPI_QC$Distancing[i], ignore.case = TRUE) && NPI_QC$Action[i]=="Eased"){
+    NPI_QC$type[i]<-"curfew eased"
+  }else if(grepl('gathering',NPI_QC$Distancing[i], ignore.case = TRUE) && NPI_QC$Action[i]=="New"){
+    NPI_QC$type[i]<-"gathering restricted"
+  }else if(grepl('gathering',NPI_QC$Distancing[i], ignore.case = TRUE) && NPI_QC$Action[i]=="Eased"){
+    NPI_QC$type[i]<-"gathering permitted"
+  }
+}
+NPI_QC
+
+ggplot(NPI_QC,aes(x=date))+geom_point(aes(y=R_actual_QC))+
+  geom_point(aes(y=R_actual_QC,colour = type),na.translate=FALSE)+ scale_fill_discrete(na.translate=FALSE)+ylim(0,3) +
+  theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())+
+  scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01")))
+```
+
+```{r}
+NPI_QC %>% filter(Action=='New') %>% filter(type=='curfew imposed')
+```
+
+
+NPI only ON
+```{r}
+s3 <- read_excel("/Users/oliviashi/Library/Containers/com.microsoft.Excel/Data/Downloads/aoda-covid-19-intervention-timeline-in-canada-en.xlsx",sheet=3,col_names=TRUE,skip=2)
+s3$date <- as.Date(s3$`Start date`,format="%d-%m-%Y", tryFormats= "%Y-%m-%d")
+s3$cat <- s3$`Intervention Category`
+s3 <- s3 %>% dplyr::select("Entry ID","date","cat","Action","Jurisdiction","Description") %>% filter(Jurisdiction=="Que.")
+s3 <- tibble(s3)
+da <- join(df_ci_both,s3,by="date",type="left",match="first")
+
+NPI_ON <- da %>% dplyr::select(date,I_actual_ON,cat,Action,Description,R_actual_ON)
+NPI_ON <- pivot_wider(data=NPI_ON,names_from=cat,values_from=Description) %>% dplyr::select(date,Action,I_actual_ON,R_actual_ON,`Closures/openings`,Distancing)
+NPI_ON$type<-NA
+
+for(i in 1:length(NPI_ON$date)){
+  if(is.na(NPI_ON$`Closures/openings`[i])){
+    NPI_ON$`Closures/openings`[i]<-NA
+  }else if(grepl('school',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) &&
+           NPI_ON$Action[i]=="New"){
+    NPI_ON$type[i]<-"school closed"
+  }else if(grepl('school',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE) &&
+           NPI_ON$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"school opened"
+  }else if((grepl('non-essential',NPI_ON$`Closures/openings`[i], ignore.case = TRUE) ||
+            grepl('restaurant',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('bar',NPI_ON$`Closures/openings`[i], ignore.case = TRUE)) &&
+           NPI_ON$Action[i]=="New"){
+    NPI_ON$type[i]<-"non-essential business opened"
+  }else if((grepl('non-essential',NPI_ON$`Closures/openings`[i], ignore.case = TRUE) ||
+            grepl('restaurant',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('bar',NPI_ON$`Closures/openings`[i], ignore.case = TRUE)) &&
+           NPI_ON$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"non-essential business opened"
+  }else if((grepl('public places',NPI_ON$`Closures/openings`[i], ignore.case = TRUE) ||
+            grepl('parks',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('museums',NPI_ON$`Closures/openings`[i], ignore.case = TRUE)) &&
+           NPI_ON$Action[i]=="New"){
+    NPI_ON$type[i]<-"public places closed"
+  }else if((grepl('public places',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('parks',NPI_ON$`Closures/openings`[i], ignore.case = TRUE, fixed=FALSE)||
+            grepl('museums',NPI_ON$`Closures/openings`[i], ignore.case = TRUE,fixed=FALSE)||
+            grepl('worship',NPI_ON$`Closures/openings`[i], ignore.case = TRUE)) && NPI_ON$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"public places opened"
+  }
+}
+
+for(i in 1:length(NPI_ON$date)){
+  if(is.na(NPI_ON$Distancing[i])){
+    NPI_ON$Distancing[i]<-NA
+  }else if(grepl('gathering',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    NPI_ON$type[i]<-"gathering restricted"
+  }else if(grepl('gathering',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"gathering permitted"
+  }else if(grepl('worship',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    NPI_ON$type[i]<-"public places closed"
+  }else if(grepl('worship',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"public places opened"
+  }else if(grepl('bar',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="New"){
+    NPI_ON$type[i]<-"non-essential business closed"
+  }else if(grepl('bar',NPI_ON$Distancing[i], ignore.case = TRUE) && da$Action[i]=="Eased"){
+    NPI_ON$type[i]<-"non-essential business opened"
+  }
+}
+NPI_ON
+
+ggplot(NPI_ON,aes(x=date))+geom_point(aes(y=R_actual_ON))+
+  geom_point(aes(y=R_actual_ON,colour = type),na.translate=FALSE)+
+  scale_fill_discrete(na.translate=FALSE)+ylim(0,3)+
+  theme(legend.position = c(0.8, 0.8),legend.title = element_text(size = 5),legend.text = element_text(size = 5),legend.key.size=unit(0.5,"lines"),legend.key = element_blank())+scale_x_date(breaks = "2 months", date_labels = "%b %y",limits = as.Date(c("2020-10-01","2021-07-01")))
+```
+	• what was happening in QC in mid march 21 to cause that big increase in Rt ?
+what happened in both provinces around start of April to cause the downturn ?
+
+
+```{r}
+NPI_ON %>% dplyr::select(date,Distancing) %>% filter(date>'2021-03-20') %>% filter(date<'2021-04-30')
+NPI_ON %>% dplyr::select(`Closures/openings`,date) %>% filter(date>'2021-03-20') %>% filter(date<'2021-04-30')
+
+#easing before mid march -> might explain big increase in Rt
+NPI_ON %>% dplyr::select(`Closures/openings`,date,Action) %>% filter(date>'2021-03-01') %>% filter(date<'2021-04-15') %>% filter(Action=='Eased')
+NPI_ON %>% dplyr::select(Distancing,date,Action) %>% filter(date>'2021-03-01') %>% filter(date<'2021-04-15') %>% filter(Action=='Eased')
+
+#imposing restrictions after march 25 -> might explain downturn in beginning of april
+NPI_QC %>% dplyr::select(`Closures/openings`,date,Action) %>% filter(date>'2021-03-25') %>% filter(date<'2021-04-15') %>% filter(Action=='New')
+
+
+NPI_QC %>% dplyr::select(Distancing,date,Action) %>% filter(date>'2021-03-25') %>% filter(date<'2021-04-15') %>% filter(Action=='New')
+
+
+#imposing restrictions after march 25 -> might explain downturn in beginning of april
+NPI_QC %>% dplyr::select(`Closures/openings`,date,Action) %>% filter(date>'2021-03-15') %>% filter(date<'2021-04-15') %>% filter(Action=='Eased')
+
+
+NPI_QC %>% dplyr::select(Distancing,date,Action) %>% filter(date>'2021-03-15') %>% filter(date<'2021-05-15') %>% filter(Action=='New')
+
+
+
+NPI_ON %>% dplyr::select(`Closures/openings`,date,Action) %>% filter(date>'2021-02-01') %>% filter(date<'2021-04-15') %>% filter(Action=='Eased')
+NPI_QC %>% dplyr::select(Distancing,date,Action) %>% filter(date>'2021-02-01') %>% filter(date<'2021-04-15') %>% filter(Action=='Eased')
+
+
+NPI_ON %>% dplyr::select(`Closures/openings`,date,Action) %>% filter(date>'2021-02-01') %>% filter(date<'2021-02-30') %>% filter(Action=='Eased')
+NPI_ON %>% dplyr::select(Distancing,date,Action) %>% filter(date>'2021-02-01') %>% filter(date<'2021-02-30') %>% filter(Action=='Eased')
+```
+
+
+
+
+
+
+
+
