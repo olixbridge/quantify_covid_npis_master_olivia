@@ -9,6 +9,8 @@ window_size can be changed
 |annotated_plot_npi_qc.R	|The Rt plot for the two provinces with annotated NPIs	|July 15
 |fig_3.1_figure_poisson_regression_get_r_1.5_0.8.Rmd	|Give EpiEstim a fixed Rt and w to see if the algorithm can reconstruct the Rt.	|July 15
 |state_space_model_synthetic_rt.R	|The synthetic Rt plot	|July 15
+|dlm_run_both_provinces.R| Generates dataset from dlm | |
+|fig_2.2_positivity_each_province.Rmd| positivity plot for each provinces in Canada| | 
 		
 		
 		
