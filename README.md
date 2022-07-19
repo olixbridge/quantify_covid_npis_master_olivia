@@ -3,14 +3,6 @@ generates data and store to csv files for both Ontario and Quebec
 window_size can be changed
 
 
-
-NOTE
-	1. Please be careful when running the file 'dlm_run_both_provinces.R' as it may rewrite the data in the data_output folder. Currently, the data are generated using 2000 iterations. 
-	
-
-
-
-
 |Filename|	Description|	Last verified by|
 | :---: | :---: | :---: |
 |change_point.R 	|The progression of Rt in the absence of intervention	|July 15
@@ -21,3 +13,5 @@ NOTE
 		
 		
 
+Note
+1. Please be careful when running the file 'dlm_run_both_provinces.R' as it may rewrite the data in the data_output folder. Currently, the data are generated using 2000 iterations. 
